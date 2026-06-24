@@ -3,7 +3,6 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js";
 import { toFile } from "openai/uploads";
 
 const app = express();
@@ -13,9 +12,7 @@ app.use(cors({ origin: process.env.CORS_ORIGIN || "*", credentials: false }));
 app.use(express.json({ limit: "2mb" }));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// TEMP Release 5.2 test user: valid UUID for Supabase inserts
 async function getUser(req) {
   return {
     id: "00000000-0000-0000-0000-000000000000"
@@ -33,6 +30,7 @@ function safeJsonParse(text) {
     .replace(/^```\s*/i, "")
     .replace(/```$/i, "")
     .trim();
+
   return JSON.parse(cleaned);
 }
 
@@ -55,7 +53,7 @@ async function generateCards(sentences) {
 }
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, version: "0.2.2-test-user-uuid" });
+  res.json({ ok: true, version: "0.2.3-ai-only-no-supabase-save" });
 });
 
 app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => {
@@ -81,56 +79,21 @@ app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => 
 
 app.post("/process-sentences", async (req, res, next) => {
   try {
-    const user = await getUser(req);
-    const { deckId, deckName, sentences } = req.body || {};
+    const { deckName, sentences } = req.body || {};
     const cleanSentences = cleanSentenceList(sentences);
 
     if (!cleanSentences.length) {
       return res.status(400).json({ error: "No sentences supplied" });
     }
 
-    let finalDeckId = deckId || null;
-
-    if (!finalDeckId) {
-      const { data: deck, error } = await supabase
-        .from("decks")
-        .insert({
-          user_id: user.id,
-          name: String(deckName || "Recorded sentences").trim() || "Recorded sentences"
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-      finalDeckId = deck.id;
-    }
-
     const cards = await generateCards(cleanSentences);
-
-    const rows = cards.map((card, idx) => ({
-      user_id: user.id,
-      deck_id: finalDeckId,
-      status: "complete",
-      english: String(card.english || cleanSentences[idx] || "").trim(),
-      japanese: String(card.japanese || "").trim(),
-      kana: String(card.kana || "").trim(),
-      romaji: String(card.romaji || "").trim(),
-      difficulty: [1, 2, 3].includes(Number(card.difficulty)) ? Number(card.difficulty) : 2,
-      words: Array.isArray(card.words) ? card.words : []
-    }));
-
-    const { data: savedCards, error } = await supabase
-      .from("cards")
-      .insert(rows)
-      .select();
-
-    if (error) throw error;
 
     res.json({
       ok: true,
-      deckId: finalDeckId,
-      count: savedCards.length,
-      cards: savedCards
+      deckId: "test-deck",
+      deckName: String(deckName || "Test").trim() || "Test",
+      count: cards.length,
+      cards
     });
   } catch (err) {
     next(err);
@@ -144,5 +107,5 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => {
-  console.log(`Japanese Study backend v0.2.2 test user UUID running on port ${port}`);
+  console.log(`Japanese Study backend v0.2.3 AI-only test running on port ${port}`);
 });
