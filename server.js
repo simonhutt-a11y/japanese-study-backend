@@ -15,9 +15,11 @@ app.use(express.json({ limit: "2mb" }));
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// TEMPORARY Release 5.2 test user: bypass Supabase login while testing AI card generation
+// TEMP Release 5.2 test user: valid UUID for Supabase inserts
 async function getUser(req) {
-  return { id: "test-user" };
+  return {
+    id: "00000000-0000-0000-0000-000000000000"
+  };
 }
 
 function cleanSentenceList(sentences) {
@@ -52,7 +54,9 @@ async function generateCards(sentences) {
   return parsed.cards;
 }
 
-app.get("/health", (req, res) => res.json({ ok: true, version: "0.2.1-test-login-bypass" }));
+app.get("/health", (req, res) => {
+  res.json({ ok: true, version: "0.2.2-test-user-uuid" });
+});
 
 app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => {
   try {
@@ -139,4 +143,6 @@ app.use((err, req, res, next) => {
 });
 
 const port = Number(process.env.PORT || 8787);
-app.listen(port, () => console.log(`Japanese Study backend v0.2.1 test login bypass running on port ${port}`));
+app.listen(port, () => {
+  console.log(`Japanese Study backend v0.2.2 test user UUID running on port ${port}`);
+});
