@@ -15,16 +15,9 @@ app.use(express.json({ limit: "2mb" }));
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
+// TEMPORARY Release 5.2 test user: bypass Supabase login while testing AI card generation
 async function getUser(req) {
   return { id: "test-user" };
-}
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data?.user) {
-    const err = new Error("Invalid login token");
-    err.status = 401;
-    throw err;
-  }
-  return data.user;
 }
 
 function cleanSentenceList(sentences) {
@@ -53,12 +46,13 @@ async function generateCards(sentences) {
       JSON.stringify(sentences, null, 2) +
       '\n\nReturn JSON shaped as: {"cards":[{"english":"","japanese":"","kana":"","romaji":"","difficulty":2,"words":[{"jp":"","romaji":"","meaning":""}]}]}'
   });
+
   const parsed = safeJsonParse(response.output_text);
   if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid cards JSON");
   return parsed.cards;
 }
 
-app.get("/health", (req, res) => res.json({ ok: true, version: "0.2.0" }));
+app.get("/health", (req, res) => res.json({ ok: true, version: "0.2.1-test-login-bypass" }));
 
 app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => {
   try {
@@ -86,20 +80,29 @@ app.post("/process-sentences", async (req, res, next) => {
     const user = await getUser(req);
     const { deckId, deckName, sentences } = req.body || {};
     const cleanSentences = cleanSentenceList(sentences);
-    if (!cleanSentences.length) return res.status(400).json({ error: "No sentences supplied" });
+
+    if (!cleanSentences.length) {
+      return res.status(400).json({ error: "No sentences supplied" });
+    }
 
     let finalDeckId = deckId || null;
+
     if (!finalDeckId) {
       const { data: deck, error } = await supabase
         .from("decks")
-        .insert({ user_id: user.id, name: String(deckName || "Recorded sentences").trim() || "Recorded sentences" })
+        .insert({
+          user_id: user.id,
+          name: String(deckName || "Recorded sentences").trim() || "Recorded sentences"
+        })
         .select()
         .single();
+
       if (error) throw error;
       finalDeckId = deck.id;
     }
 
     const cards = await generateCards(cleanSentences);
+
     const rows = cards.map((card, idx) => ({
       user_id: user.id,
       deck_id: finalDeckId,
@@ -108,13 +111,23 @@ app.post("/process-sentences", async (req, res, next) => {
       japanese: String(card.japanese || "").trim(),
       kana: String(card.kana || "").trim(),
       romaji: String(card.romaji || "").trim(),
-      difficulty: [1,2,3].includes(Number(card.difficulty)) ? Number(card.difficulty) : 2,
+      difficulty: [1, 2, 3].includes(Number(card.difficulty)) ? Number(card.difficulty) : 2,
       words: Array.isArray(card.words) ? card.words : []
     }));
 
-    const { data: savedCards, error } = await supabase.from("cards").insert(rows).select();
+    const { data: savedCards, error } = await supabase
+      .from("cards")
+      .insert(rows)
+      .select();
+
     if (error) throw error;
-    res.json({ ok: true, deckId: finalDeckId, count: savedCards.length, cards: savedCards });
+
+    res.json({
+      ok: true,
+      deckId: finalDeckId,
+      count: savedCards.length,
+      cards: savedCards
+    });
   } catch (err) {
     next(err);
   }
@@ -126,4 +139,4 @@ app.use((err, req, res, next) => {
 });
 
 const port = Number(process.env.PORT || 8787);
-app.listen(port, () => console.log(`Japanese Study backend v0.2 running on port ${port}`));
+app.listen(port, () => console.log(`Japanese Study backend v0.2.1 test login bypass running on port ${port}`));
