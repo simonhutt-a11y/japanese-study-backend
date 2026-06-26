@@ -4,6 +4,7 @@ import cors from "cors";
 import multer from "multer";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -12,6 +13,11 @@ app.use(cors({ origin: process.env.CORS_ORIGIN || "*", credentials: false }));
 app.use(express.json({ limit: "2mb" }));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 async function getUser(req) {
   return {
@@ -52,8 +58,48 @@ async function generateCards(sentences) {
   return parsed.cards;
 }
 
+async function saveDeckAndCards({ userId, deckName, cards }) {
+  const cleanDeckName = String(deckName || "Untitled folder").trim() || "Untitled folder";
+
+  const { data: deck, error: deckError } = await supabase
+    .from("decks")
+    .insert({
+      user_id: userId,
+      name: cleanDeckName
+    })
+    .select()
+    .single();
+
+  if (deckError) throw new Error(`Supabase deck save failed: ${deckError.message}`);
+
+  const cardRows = cards.map((card, index) => ({
+    user_id: userId,
+    deck_id: deck.id,
+    english: card.english || "",
+    japanese: card.japanese || "",
+    kana: card.kana || "",
+    romaji: card.romaji || "",
+    difficulty: Number(card.difficulty || 2),
+    words: card.words || [],
+    position: index
+  }));
+
+  const { data: savedCards, error: cardsError } = await supabase
+    .from("cards")
+    .insert(cardRows)
+    .select();
+
+  if (cardsError) throw new Error(`Supabase cards save failed: ${cardsError.message}`);
+
+  return { deck, cards: savedCards || [] };
+}
+
 app.get("/health", (req, res) => {
-  res.json({ ok: true, version: "0.2.3-ai-only-no-supabase-save" });
+  res.json({
+    ok: true,
+    version: "0.2.4-supabase-save",
+    supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  });
 });
 
 app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => {
@@ -79,6 +125,7 @@ app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => 
 
 app.post("/process-sentences", async (req, res, next) => {
   try {
+    const user = await getUser(req);
     const { deckName, sentences } = req.body || {};
     const cleanSentences = cleanSentenceList(sentences);
 
@@ -86,15 +133,38 @@ app.post("/process-sentences", async (req, res, next) => {
       return res.status(400).json({ error: "No sentences supplied" });
     }
 
-    const cards = await generateCards(cleanSentences);
+    const generatedCards = await generateCards(cleanSentences);
+    const saved = await saveDeckAndCards({
+      userId: user.id,
+      deckName,
+      cards: generatedCards
+    });
 
     res.json({
       ok: true,
-      deckId: "test-deck",
-      deckName: String(deckName || "Test").trim() || "Test",
-      count: cards.length,
-      cards
+      deckId: saved.deck.id,
+      deckName: saved.deck.name,
+      count: saved.cards.length,
+      cards: saved.cards
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/decks", async (req, res, next) => {
+  try {
+    const user = await getUser(req);
+
+    const { data, error } = await supabase
+      .from("decks")
+      .select("*, cards(*)")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(`Supabase deck load failed: ${error.message}`);
+
+    res.json({ ok: true, decks: data || [] });
   } catch (err) {
     next(err);
   }
@@ -107,5 +177,5 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => {
-  console.log(`Japanese Study backend v0.2.3 AI-only test running on port ${port}`);
+  console.log(`Japanese Study backend v0.2.4 Supabase-save running on port ${port}`);
 });
