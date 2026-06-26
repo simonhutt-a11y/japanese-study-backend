@@ -95,8 +95,8 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
     kana: card.kana || "",
     romaji: card.romaji || "",
     difficulty: Number(card.difficulty || 2),
-    words: card.words || [],
-    position: index
+    words: card.words || []
+  
   }));
 
   const { data: savedCards, error: cardsError } = await supabase
