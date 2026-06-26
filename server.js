@@ -20,9 +20,24 @@ const supabase = createClient(
 );
 
 async function getUser(req) {
-  return {
-    id: "00000000-0000-0000-0000-000000000000"
-  };
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    const err = new Error("Missing login token. Please log in again.");
+    err.status = 401;
+    throw err;
+  }
+
+  const { data, error } = await supabase.auth.getUser(token);
+
+  if (error || !data?.user?.id) {
+    const err = new Error("Invalid or expired login token. Please log in again.");
+    err.status = 401;
+    throw err;
+  }
+
+  return data.user;
 }
 
 function cleanSentenceList(sentences) {
@@ -97,7 +112,7 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    version: "0.2.4-supabase-save",
+    version: "0.2.5-auth-user",
     supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
   });
 });
@@ -177,5 +192,5 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => {
-  console.log(`Japanese Study backend v0.2.4 Supabase-save running on port ${port}`);
+  console.log(`Japanese Study backend v0.2.5 auth-user running on port ${port}`);
 });
