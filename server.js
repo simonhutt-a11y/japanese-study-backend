@@ -55,7 +55,60 @@ function safeJsonParse(text) {
   return JSON.parse(cleaned);
 }
 
-async function generateCards(sentences) {
+async function transcribeAudio(fileBuffer, originalname, mimetype) {
+  const file = await toFile(fileBuffer, originalname || "sentence.webm", {
+    type: mimetype || "audio/webm"
+  });
+
+  const transcription = await openai.audio.transcriptions.create({
+    file,
+    model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe",
+    language: "en"
+  });
+
+  return String(transcription.text || "").trim();
+}
+
+async function generateFastCards(sentences) {
+  const response = await openai.responses.create({
+    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    instructions:
+      "Return only valid JSON. Create fast Japanese travel/conversation study cards. " +
+      "Prioritise speed. No explanations. No markdown. " +
+      "Return natural Japanese, readable Hepburn romaji, and difficulty 1-3. " +
+      "Leave words as an empty array.",
+    input:
+      JSON.stringify({
+        sentences,
+        output_shape: {
+          cards: [
+            {
+              english: "",
+              japanese: "",
+              kana: "",
+              romaji: "",
+              difficulty: 2,
+              words: []
+            }
+          ]
+        }
+      })
+  });
+
+  const parsed = safeJsonParse(response.output_text);
+  if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid fast cards JSON");
+
+  return parsed.cards.map((card, index) => ({
+    english: card.english || sentences[index] || "",
+    japanese: card.japanese || "",
+    kana: card.kana || card.japanese || "",
+    romaji: card.romaji || "",
+    difficulty: Number(card.difficulty || 2),
+    words: []
+  }));
+}
+
+async function generateFullCards(sentences) {
   const response = await openai.responses.create({
     model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
     instructions:
@@ -95,8 +148,8 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
     kana: card.kana || "",
     romaji: card.romaji || "",
     difficulty: Number(card.difficulty || 2),
-    words: card.words || []
-  
+    words: Array.isArray(card.words) ? card.words : [],
+    position: index
   }));
 
   const { data: savedCards, error: cardsError } = await supabase
@@ -112,43 +165,53 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    version: "0.2.5-auth-user",
-    supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+    version: "0.2.8-fast-path",
+    supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
+    fastModel: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe"
   });
 });
 
 app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => {
+  const started = Date.now();
+
   try {
     await getUser(req);
     if (!req.file) return res.status(400).json({ error: "No audio file uploaded" });
 
-    const file = await toFile(req.file.buffer, req.file.originalname || "sentence.webm", {
-      type: req.file.mimetype || "audio/webm"
-    });
+    const text = await transcribeAudio(req.file.buffer, req.file.originalname, req.file.mimetype);
 
-    const transcription = await openai.audio.transcriptions.create({
-      file,
-      model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe",
-      language: "en"
+    res.json({
+      ok: true,
+      text,
+      timings: {
+        totalMs: Date.now() - started
+      }
     });
-
-    res.json({ ok: true, text: transcription.text || "" });
   } catch (err) {
     next(err);
   }
 });
 
 app.post("/process-sentences", async (req, res, next) => {
+  const started = Date.now();
+
   try {
     const user = await getUser(req);
-    const { deckName, sentences } = req.body || {};
+    const { deckName, sentences, fast, mode, skipBreakdown } = req.body || {};
     const cleanSentences = cleanSentenceList(sentences);
 
     if (!cleanSentences.length) {
       return res.status(400).json({ error: "No sentences supplied" });
     }
 
-    const generatedCards = await generateCards(cleanSentences);
+    const useFast = fast === true || mode === "fast" || skipBreakdown === true;
+    const generatedCards = useFast
+      ? await generateFastCards(cleanSentences)
+      : await generateFullCards(cleanSentences);
+
+    const aiMs = Date.now() - started;
+
     const saved = await saveDeckAndCards({
       userId: user.id,
       deckName,
@@ -157,10 +220,71 @@ app.post("/process-sentences", async (req, res, next) => {
 
     res.json({
       ok: true,
+      fast: useFast,
       deckId: saved.deck.id,
       deckName: saved.deck.name,
       count: saved.cards.length,
-      cards: saved.cards
+      cards: saved.cards,
+      timings: {
+        aiMs,
+        totalMs: Date.now() - started
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/process-sentences-fast", async (req, res, next) => {
+  req.body = { ...(req.body || {}), fast: true, skipBreakdown: true };
+  app._router.handle(req, res, next);
+});
+
+app.post("/capture-audio-fast", upload.single("audio"), async (req, res, next) => {
+  const started = Date.now();
+
+  try {
+    const user = await getUser(req);
+    if (!req.file) return res.status(400).json({ error: "No audio file uploaded" });
+
+    const { deckName } = req.body || {};
+
+    const english = await transcribeAudio(req.file.buffer, req.file.originalname, req.file.mimetype);
+    const transcribeMs = Date.now() - started;
+
+    if (!english) {
+      return res.status(400).json({
+        ok: false,
+        error: "No speech detected",
+        timings: {
+          transcribeMs,
+          totalMs: Date.now() - started
+        }
+      });
+    }
+
+    const generatedCards = await generateFastCards([english]);
+    const aiMs = Date.now() - started - transcribeMs;
+
+    const saved = await saveDeckAndCards({
+      userId: user.id,
+      deckName,
+      cards: generatedCards
+    });
+
+    res.json({
+      ok: true,
+      fast: true,
+      text: english,
+      deckId: saved.deck.id,
+      deckName: saved.deck.name,
+      count: saved.cards.length,
+      cards: saved.cards,
+      timings: {
+        transcribeMs,
+        aiMs,
+        totalMs: Date.now() - started
+      }
     });
   } catch (err) {
     next(err);
@@ -192,5 +316,5 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => {
-  console.log(`Japanese Study backend v0.2.5 auth-user running on port ${port}`);
+  console.log(`Japanese Study backend v0.2.8 fast-path running on port ${port}`);
 });
