@@ -107,7 +107,28 @@ async function generateFastCards(sentences) {
     words: []
   }));
 }
+async function generateInstantTranslation(english) {
+  const response = await openai.responses.create({
+    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    instructions:
+      "Return only valid JSON. Translate the English sentence into natural Japanese for immediate spoken use. " +
+      "Return only japanese and romaji. No explanation. No markdown.",
+    input: JSON.stringify({
+      english,
+      output_shape: {
+        japanese: "",
+        romaji: ""
+      }
+    })
+  });
 
+  const parsed = safeJsonParse(response.output_text);
+
+  return {
+    japanese: parsed.japanese || "",
+    romaji: parsed.romaji || ""
+  };
+}
 async function generateFullCards(sentences) {
   const response = await openai.responses.create({
     model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
@@ -165,7 +186,7 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    version: "0.2.8-fast-path",
+    version: "0.2.9-instant-translate",
     supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
     fastModel: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
     transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe"
@@ -192,7 +213,33 @@ app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => 
     next(err);
   }
 });
+app.post("/translate-instant", async (req, res, next) => {
+  const started = Date.now();
 
+  try {
+    await getUser(req);
+
+    const english = String(req.body?.english || "").trim();
+
+    if (!english) {
+      return res.status(400).json({ error: "No English supplied" });
+    }
+
+    const translated = await generateInstantTranslation(english);
+
+    res.json({
+      ok: true,
+      english,
+      romaji: translated.romaji,
+      japanese: translated.japanese,
+      timings: {
+        totalMs: Date.now() - started
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 app.post("/process-sentences", async (req, res, next) => {
   const started = Date.now();
 
@@ -316,5 +363,5 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => {
-  console.log(`Japanese Study backend v0.2.8 fast-path running on port ${port}`);
+  console.log(`Japanese Study backend v0.2.9 instant-translate running on port ${port}`);
 });
