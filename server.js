@@ -134,7 +134,7 @@ async function generateFastCards(sentences) {
     instructions:
       "Return only valid JSON. Create fast Japanese travel/conversation study cards. " +
       "Prioritise speed. No explanations. No markdown. " +
-      "Return natural Japanese, readable Hepburn romaji, and difficulty 1-3. " +
+      "Return natural Japanese, readable Hepburn romaji, and difficulty 1-3. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists. " +
       "Leave words as an empty array.",
     input:
       JSON.stringify({
@@ -172,7 +172,7 @@ async function generateInstantTranslation(english) {
     model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
     instructions:
       "Return only valid JSON. Translate the English sentence into natural Japanese for immediate spoken use. " +
-      "Return only japanese and romaji. No explanation. No markdown.",
+      "Return only japanese and romaji. No explanation. No markdown. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists (a shopping bag is 袋, not バッグ).",
     input: JSON.stringify({
       english,
       output_shape: {
@@ -194,11 +194,11 @@ async function generateInstantTranslation(english) {
     instructions:
       "You create Japanese study cards for an English-speaking learner. Return only valid JSON. " +
       "Keep translations natural and useful for travel/conversation. Kana must be Japanese script. " +
-      "Romaji must be readable Hepburn-style romaji. Difficulty must be 1, 2, or 3.",
+      "Romaji must be readable Hepburn-style romaji. Difficulty must be 1, 2, or 3. Use the vocabulary a native Japanese speaker would naturally use in the situation the sentence implies, and prefer native words over katakana loanwords when both exist (for a shopping bag say 袋 fukuro, not バッグ). The words array must be a word-by-word breakdown of the EXACT japanese sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english. Every words entry must include jp exactly as written in the sentence, kana giving that word's reading in hiragana exactly as pronounced in this sentence, readable Hepburn romaji, and a short english meaning. The card kana field must be the exact hiragana reading of the japanese field.",
     input:
       "Create study cards for these English sentences:\n\n" +
       JSON.stringify(sentences, null, 2) +
-      '\n\nReturn JSON shaped as: {"cards":[{"english":"","japanese":"","kana":"","romaji":"","difficulty":2,"words":[{"jp":"","romaji":"","meaning":""}]}]}'
+      '\n\nReturn JSON shaped as: {"cards":[{"english":"","japanese":"","kana":"","romaji":"","difficulty":2,"words":[{"jp":"","kana":"","romaji":"","meaning":""}]}]}'
   });
 
   const parsed = safeJsonParse(response.output_text);
