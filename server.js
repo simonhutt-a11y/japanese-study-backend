@@ -135,7 +135,7 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
 
 async function generateFastCards(sentences) {
   const response = await openai.responses.create({
-    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
     instructions:
       "Return only valid JSON. Create fast Japanese travel/conversation study cards. " +
       "Prioritise speed. No explanations. No markdown. " +
@@ -174,7 +174,7 @@ async function generateFastCards(sentences) {
 
 async function generateInstantTranslation(english) {
   const response = await openai.responses.create({
-    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
     instructions:
       "Return only valid JSON. Translate the English sentence into natural Japanese for immediate spoken use. " +
       "Return only japanese and romaji. No explanation. No markdown. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists (a shopping bag is 袋, not バッグ).",
@@ -228,7 +228,7 @@ async function generateConversationTurn({
   });
 
   const response = await openai.responses.create({
-    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
     instructions:
       "Return only valid JSON. You are the WordHole multilingual conversation translator. " +
       "Translate natural spoken conversation without softening, censoring, moralising, or over-explaining. " +
@@ -293,7 +293,7 @@ async function detectLanguageFromText({
   const cleanText = String(text || "").trim();
 
   const response = await openai.responses.create({
-    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
     instructions:
       "Return only valid JSON. Detect the language of the supplied text. " +
       "Prefer one of the supported WordHole language codes. No markdown. No explanations.",
@@ -361,7 +361,7 @@ app.get("/health", (req, res) => {
     ok: true,
     version: BACKEND_VERSION,
     supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
-    fastModel: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        fastModel: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
         transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1",
     supportedLanguages: SUPPORTED_LANGUAGE_LIST.map(lang => ({
       code: lang.code,
