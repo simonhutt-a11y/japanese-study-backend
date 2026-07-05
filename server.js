@@ -31,7 +31,9 @@ const SUPPORTED_LANGUAGES = {
   es: { code: "es", name: "Spanish", transcriptionHint: "es" },
   fr: { code: "fr", name: "French", transcriptionHint: "fr" },
   de: { code: "de", name: "German", transcriptionHint: "de" },
-  it: { code: "it", name: "Italian", transcriptionHint: "it" }
+  it: { code: "it", name: "Italian", transcriptionHint: "it" },
+  da: { code: "da", name: "Danish", transcriptionHint: "da" },
+  pt: { code: "pt", name: "Portuguese", transcriptionHint: "pt" }
 };
 
 const SUPPORTED_LANGUAGE_LIST = Object.values(SUPPORTED_LANGUAGES);
@@ -86,6 +88,8 @@ function normalizeLanguageCode(value) {
   if (raw.startsWith("fr")) return "fr";
   if (raw.startsWith("de")) return "de";
   if (raw.startsWith("it")) return "it";
+  if (raw.startsWith("da")) return "da";
+  if (raw.startsWith("pt")) return "pt";
 
   return raw.slice(0, 2);
 }
