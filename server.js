@@ -121,11 +121,12 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
 
   const request = {
     file,
-    model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe"
+            model: process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1"
   };
 
   const language = normalizeLanguageCode(options.language);
   if (language) request.language = language;
+  if (options.prompt) request.prompt = options.prompt;
 
   const transcription = await openai.audio.transcriptions.create(request);
 
@@ -361,7 +362,7 @@ app.get("/health", (req, res) => {
     version: BACKEND_VERSION,
     supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
     fastModel: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
-    transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe",
+        transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1",
     supportedLanguages: SUPPORTED_LANGUAGE_LIST.map(lang => ({
       code: lang.code,
       name: lang.name
@@ -444,7 +445,7 @@ app.post("/translate-instant", async (req, res, next) => {
         req.file.originalname,
         req.file.mimetype,
         {
-          language: suppliedSourceLanguage
+          language: suppliedSourceLanguage, prompt: suppliedSourceLanguage === "ja" ? "袋はありますか。コーヒーをお願いします。駅はどこですか。すみません、これをください。トイレはどこですか。ありがとうございます。" : undefined
         }
       );
       transcribeMs = Date.now() - transcribeStarted;
