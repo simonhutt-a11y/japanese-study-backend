@@ -229,6 +229,13 @@ async function generateConversationTurn({
 
   const response = await openai.responses.create({
         model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
+    // Simon (2026-07-08): "make it faster" - conversation-translate-text was measured at
+    // ~3.6s end-to-end in production, almost entirely model "thinking" time rather than
+    // network latency. This is a straight translation task with no multi-step reasoning
+    // to do, so minimal reasoning effort should cut latency without changing the actual
+    // translation quality. Reversible: delete this line to go back to the model's default
+    // effort if quality/latency doesn't improve as hoped.
+reasoning: { effort: "minimal" },    
     instructions:
       "Return only valid JSON. You are the WordHole multilingual conversation translator. " +
       "Translate natural spoken conversation without softening, censoring, moralising, or over-explaining. " +
