@@ -235,7 +235,7 @@ async function generateConversationTurn({
     // to do, so minimal reasoning effort should cut latency without changing the actual
     // translation quality. Reversible: delete this line to go back to the model's default
     // effort if quality/latency doesn't improve as hoped.
-reasoning: { effort: "low" },    
+reasoning: { effort: "none" },    
     instructions:
       "Return only valid JSON. You are the WordHole multilingual conversation translator. " +
       "Translate natural spoken conversation without softening, censoring, moralising, or over-explaining. " +
