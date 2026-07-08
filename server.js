@@ -99,6 +99,27 @@ function languageName(code) {
   return SUPPORTED_LANGUAGES[clean]?.name || clean || "Unknown";
 }
 
+// 12.0 (Simon: "English to german has DBs in japanese" / "same with italian"): the
+// process-sentences card generators below were hardcoded to Japanese with no language
+// parameter at all, so every non-Japanese decks def-boxes were silently generated in
+// Japanese regardless of the language actually selected in the app. Unknown/missing codes
+// fall back to "ja" (the original behavior) for zero regression risk to the already-
+// correct, most-used language.
+function resolveCardsLanguage(targetLanguage) {
+  const normalized = normalizeLanguageCode(targetLanguage);
+  return SUPPORTED_LANGUAGES[normalized] ? normalized : "ja";
+}
+function buildNonJapaneseFastInstructions(langLabel) {
+  return "Return only valid JSON. Create fast " + langLabel + " travel/conversation study cards for an English-speaking learner. " +
+    "Prioritise speed. No explanations. No markdown. " +
+    "The \"japanese\" field must hold the natural " + langLabel + " translation (despite its name, this field always holds whichever language is being studied). The \"romaji\" field should give a simple Latin-letter pronunciation guide if that helps an English speaker say it, or repeat the " + langLabel + " text if the language already uses the Latin alphabet. Difficulty 1-3. " +
+    "Leave words as an empty array.";
+}
+function buildNonJapaneseFullInstructions(langLabel) {
+  return "You create " + langLabel + " study cards for an English-speaking learner. Return only valid JSON. " +
+    "Keep translations natural and useful for travel/conversation. The \"japanese\" field must contain the natural " + langLabel + " translation (despite its name, this field always holds whichever language is being studied, not literally Japanese). The \"kana\" field should repeat that same " + langLabel + " text exactly - no script conversion is needed for this language. The \"romaji\" field should give a simple, readable Latin-letter pronunciation guide if that would help an English speaker say it aloud, or repeat the " + langLabel + " text if the language already uses the Latin alphabet and needs no extra guide. Difficulty must be 1, 2, or 3. Use the vocabulary a native speaker would naturally use in the situation the sentence implies. The words array must be a word-by-word (or short natural phrase) breakdown of the EXACT " + langLabel + " sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english sentence. Every words entry must include jp (the " + langLabel + " word or phrase exactly as written in the sentence - despite the field name, not literally Japanese), kana (repeat jp - no separate reading needed for this language), romaji (a simple pronunciation guide, or repeat jp if " + langLabel + " already uses the Latin alphabet), and a short english meaning. The card kana field must exactly match the japanese field for this language.";
+}
+
 function resolveConversationTargetLanguage({ sourceLanguage, primaryLanguage, partnerLanguage, targetLanguage }) {
   const source = normalizeLanguageCode(sourceLanguage);
   const primary = normalizeLanguageCode(primaryLanguage) || "en";
@@ -133,14 +154,17 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
   return String(transcription.text || "").trim();
 }
 
-async function generateFastCards(sentences) {
+async function generateFastCards(sentences, targetLanguage) {
+  const fastLangCode = resolveCardsLanguage(targetLanguage);
+  const fastLangLabel = languageName(fastLangCode);
   const response = await openai.responses.create({
         model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
-    instructions:
+    instructions: fastLangCode === "ja" ? (
       "Return only valid JSON. Create fast Japanese travel/conversation study cards. " +
       "Prioritise speed. No explanations. No markdown. " +
       "Return natural Japanese, readable Hepburn romaji, and difficulty 1-3. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists. " +
-      "Leave words as an empty array.",
+      "Leave words as an empty array."
+    ) : buildNonJapaneseFastInstructions(fastLangLabel),
     input:
       JSON.stringify({
         sentences,
@@ -193,13 +217,16 @@ async function generateInstantTranslation(english) {
     japanese: parsed.japanese || "",
     romaji: parsed.romaji || ""
   };
-}async function generateFullCards(sentences) {
+}async function generateFullCards(sentences, targetLanguage) {
+  const fullLangCode = resolveCardsLanguage(targetLanguage);
+  const fullLangLabel = languageName(fullLangCode);
   const response = await openai.responses.create({
     model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-    instructions:
+    instructions: fullLangCode === "ja" ? (
       "You create Japanese study cards for an English-speaking learner. Return only valid JSON. " +
       "Keep translations natural and useful for travel/conversation. Kana must be Japanese script. " +
-      "Romaji must be readable Hepburn-style romaji. Difficulty must be 1, 2, or 3. Use the vocabulary a native Japanese speaker would naturally use in the situation the sentence implies, and prefer native words over katakana loanwords when both exist (for a shopping bag say 袋 fukuro, not バッグ). The words array must be a word-by-word breakdown of the EXACT japanese sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english. Every words entry must include jp exactly as written in the sentence, kana giving that word's reading in hiragana exactly as pronounced in this sentence, readable Hepburn romaji, and a short english meaning. The card kana field must be the exact hiragana reading of the japanese field.",
+      "Romaji must be readable Hepburn-style romaji. Difficulty must be 1, 2, or 3. Use the vocabulary a native Japanese speaker would naturally use in the situation the sentence implies, and prefer native words over katakana loanwords when both exist (for a shopping bag say 袋 fukuro, not バッグ). The words array must be a word-by-word breakdown of the EXACT japanese sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english. Every words entry must include jp exactly as written in the sentence, kana giving that word's reading in hiragana exactly as pronounced in this sentence, readable Hepburn romaji, and a short english meaning. The card kana field must be the exact hiragana reading of the japanese field."
+    ) : buildNonJapaneseFullInstructions(fullLangLabel),
     input:
       "Create study cards for these English sentences:\n\n" +
       JSON.stringify(sentences, null, 2) +
@@ -569,7 +596,7 @@ app.post("/process-sentences", async (req, res, next) => {
 
   try {
     const user = await getUser(req);
-    const { deckName, sentences, fast, mode, skipBreakdown } = req.body || {};
+    const { deckName, sentences, fast, mode, skipBreakdown, targetLanguage } = req.body || {};
     const cleanSentences = cleanSentenceList(sentences);
 
     if (!cleanSentences.length) {
@@ -578,8 +605,8 @@ app.post("/process-sentences", async (req, res, next) => {
 
     const useFast = fast === true || mode === "fast" || skipBreakdown === true;
     const generatedCards = useFast
-      ? await generateFastCards(cleanSentences)
-      : await generateFullCards(cleanSentences);
+      ? await generateFastCards(cleanSentences, targetLanguage)
+      : await generateFullCards(cleanSentences, targetLanguage);
 
     const aiMs = Date.now() - started;
 
