@@ -140,18 +140,38 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
     type: mimetype || "audio/webm"
   });
 
+  const transcribeModel = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
+  const canVerify = transcribeModel === "whisper-1";
   const request = {
     file,
-            model: process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1"
+    model: transcribeModel
   };
+  if (canVerify) request.response_format = "verbose_json";
 
   const language = normalizeLanguageCode(options.language);
   if (language) request.language = language;
   if (options.prompt) request.prompt = options.prompt;
 
   const transcription = await openai.audio.transcriptions.create(request);
+  const text = String(transcription?.text || "").trim();
 
-  return String(transcription.text || "").trim();
+  if (canVerify && transcription && typeof transcription === "object") {
+    const duration = Number(transcription.duration) || 0;
+    const segments = Array.isArray(transcription.segments) ? transcription.segments : [];
+    const impliedTooLong = duration > 0 && duration < 1.5 && text.length > 25;
+    const lowConfidenceSpeech = segments.length > 0 && segments.every(seg =>
+      typeof seg?.no_speech_prob === "number" && seg.no_speech_prob > 0.6 &&
+      typeof seg?.avg_logprob === "number" && seg.avg_logprob < -0.5
+      );
+    if (impliedTooLong || lowConfidenceSpeech) {
+      console.warn("Whisper hallucination guard rejected a transcript", {
+        duration, textLength: text.length, impliedTooLong, lowConfidenceSpeech
+      });
+      return "";
+    }
+  }
+
+  return text;
 }
 
 async function generateFastCards(sentences, targetLanguage) {
