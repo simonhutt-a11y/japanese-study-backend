@@ -135,6 +135,22 @@ function resolveConversationTargetLanguage({ sourceLanguage, primaryLanguage, pa
   return primary || "en";
 }
 
+const WHISPER_HALLUCINATION_PHRASES = [
+  "thanks for watching", "thank you for watching", "thanks for listening",
+  "thank you for listening", "please subscribe", "don't forget to subscribe",
+  "like and subscribe", "hit the subscribe button", "see you next time",
+  "see you in the next video", "check out my channel", "bye bye", "bye-bye",
+  "goodbye everyone", "thank you for watching this video",
+  "thanks for watching this video"
+  ];
+function looksLikeWhisperHallucination(text, durationSeconds) {
+  const normalized = text.toLowerCase().replace(/[.!?,]/g, "").trim();
+  if (!normalized) return false;
+  const isShortClip = durationSeconds === 0 || durationSeconds < 4;
+  if (!isShortClip) return false;
+  return WHISPER_HALLUCINATION_PHRASES.some(phrase => normalized === phrase || normalized.includes(phrase));
+}
+
 async function transcribeAudio(fileBuffer, originalname, mimetype, options = {}) {
   const file = await toFile(fileBuffer, originalname || "sentence.webm", {
     type: mimetype || "audio/webm"
@@ -154,18 +170,23 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
 
   const transcription = await openai.audio.transcriptions.create(request);
   const text = String(transcription?.text || "").trim();
+  const duration = canVerify ? (Number(transcription?.duration) || 0) : 0;
+
+  if (canVerify) {
+    console.log("Whisper transcription", { duration, textLength: text.length, text: text.slice(0, 80) });
+  }
 
   if (canVerify && transcription && typeof transcription === "object") {
-    const duration = Number(transcription.duration) || 0;
     const segments = Array.isArray(transcription.segments) ? transcription.segments : [];
     const impliedTooLong = duration > 0 && duration < 1.5 && text.length > 25;
     const lowConfidenceSpeech = segments.length > 0 && segments.every(seg =>
       typeof seg?.no_speech_prob === "number" && seg.no_speech_prob > 0.6 &&
       typeof seg?.avg_logprob === "number" && seg.avg_logprob < -0.5
       );
-    if (impliedTooLong || lowConfidenceSpeech) {
+    const stockPhraseHallucination = looksLikeWhisperHallucination(text, duration);
+    if (impliedTooLong || lowConfidenceSpeech || stockPhraseHallucination) {
       console.warn("Whisper hallucination guard rejected a transcript", {
-        duration, textLength: text.length, impliedTooLong, lowConfidenceSpeech
+        duration, textLength: text.length, impliedTooLong, lowConfidenceSpeech, stockPhraseHallucination
       });
       return "";
     }
