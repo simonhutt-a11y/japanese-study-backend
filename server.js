@@ -555,6 +555,18 @@ app.post("/translate-instant", async (req, res, next) => {
       partnerLanguage
     });
 
+console.log("Conversation turn result", {
+  requestedSourceLanguage: suppliedSourceLanguage || "(auto-detect)",
+  requestedTargetLanguage: suppliedTargetLanguage || "(auto)",
+  detectedSourceLanguage: sourceLanguage,
+  transcript,
+  translatedTranscript: translated.transcript,
+  translation: translated.translation,
+  translatedSourceLanguage: translated.sourceLanguage,
+  translatedTargetLanguage: translated.targetLanguage,
+  romaji: translated.romaji
+});
+    
     res.json({
       ok: true,
       transcript: translated.transcript,
