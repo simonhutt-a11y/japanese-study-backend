@@ -611,18 +611,48 @@ async function repairExistingCard(card) {
 async function saveDeckAndCards({ userId, deckName, cards }) {
   const cleanDeckName = String(deckName || "Untitled folder").trim() || "Untitled folder";
 
-  const { data: deck, error: deckError } = await supabase
-    .from("decks")
-    .insert({
-      user_id: userId,
-      name: cleanDeckName
-    })
-    .select()
-    .single();
+    // Simon (2026-07-11: "514 decks and 8225 total card rows" / "the only things that should
+    // be saved are the cards... I want this clean"): this used to unconditionally insert() a
+    // brand-new deck on every save, so a folder name like "Originals" ended up split across
+    // hundreds of separate deck rows that only ever LOOKED like one folder because the
+    // frontend groups by name for display. Reuse an existing deck with this exact name for
+    // this user if one already exists, instead of always creating a new one.
+    const { data: existingDecks, error: existingDeckError } = await supabase
+      .from("decks")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("name", cleanDeckName)
+      .order("created_at", { ascending: true })
+      .limit(1);
 
-  if (deckError) throw new Error(`Supabase deck save failed: ${deckError.message}`);
+    if (existingDeckError) throw new Error(`Supabase deck lookup failed: ${existingDeckError.message}`);
 
-  const cardRows = cards.map((card, index) => ({
+    let deck = existingDecks && existingDecks[0];
+
+    if (!deck) {
+          const { data: newDeck, error: deckError } = await supabase
+            .from("decks")
+            .insert({ user_id: userId, name: cleanDeckName })
+            .select()
+            .single();
+
+          if (deckError) throw new Error(`Supabase deck save failed: ${deckError.message}`);
+          deck = newDeck;
+    }
+  let startPosition = 0;
+      const { data: lastPositionRows, error: positionError } = await supabase
+              .from("cards")
+              .select("position")
+              .eq("deck_id", deck.id)
+              .order("position", { ascending: false })
+              .limit(1);
+  
+      if (positionError) throw new Error(`Supabase card position lookup failed: ${positionError.message}`);
+      if (lastPositionRows && lastPositionRows.length) {
+              startPosition = Number(lastPositionRows[0].position || 0) + 1;
+      }
+  
+      const cardRows = cards.map((card, index) => ({
     user_id: userId,
     deck_id: deck.id,
     english: card.english || "",
@@ -631,7 +661,7 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
     romaji: card.romaji || "",
     difficulty: Number(card.difficulty || 2),
     words: Array.isArray(card.words) ? card.words : [],
-    position: index
+    position: startPosition + index
   }));
 
   const { data: savedCards, error: cardsError } = await supabase
@@ -899,6 +929,49 @@ app.post("/process-sentences", async (req, res, next) => {
   }
 });
 
+// Simon (2026-07-11: "your dog is cute." saved 168 times / "could this mess be slowing
+// things down?"): root cause of the runaway card-row duplication. The frontend's
+// background auto-heal system and its manual "Fix" button both used to call
+// /process-sentences purely to get a FRESH word breakdown for a card that ALREADY exists -
+// they only ever read the returned text/words back out and patch the existing card in
+// place, but /process-sentences unconditionally calls saveDeckAndCards as a side effect,
+// permanently writing a brand-new deck+card row every single time that then gets silently
+// abandoned. A card that never reaches a fully "clean" heal state keeps getting re-queued
+// across every future app load, so this compounded into hundreds of duplicate rows for the
+// same handful of stubborn sentences. This endpoint does the exact same AI regeneration as
+// /process-sentences but never persists anything - no deck row, no card row - so the
+// frontend can be repointed at this for "just get me fresh content" and the leak stops at
+// the source.
+app.post("/regenerate-card-content", async (req, res, next) => {
+    const started = Date.now();
+  
+    try {
+          await getUser(req);
+          const { sentence, sentences, fast, mode, skipBreakdown, targetLanguage } = req.body || {};
+          const cleanSentences = cleanSentenceList(
+                  Array.isArray(sentences) && sentences.length ? sentences : [sentence]
+                );
+      
+          if (!cleanSentences.length) {
+                  return res.status(400).json({ error: "No sentence supplied" });
+          }
+      
+          const useFast = fast === true || mode === "fast" || skipBreakdown === true;
+          const generatedCards = useFast
+                  ? await generateFastCards(cleanSentences, targetLanguage)
+                  : await generateFullCards(cleanSentences, targetLanguage);
+      
+          res.json({
+                  ok: true,
+                  fast: useFast,
+                  cards: generatedCards,
+                  timings: { totalMs: Date.now() - started }
+          });
+    } catch (err) {
+          next(err);
+    }
+});
+
 app.post("/process-sentences-fast", async (req, res, next) => {
   req.body = { ...(req.body || {}), fast: true, skipBreakdown: true };
   app._router.handle(req, res, next);
@@ -971,10 +1044,27 @@ app.post("/repair-existing-cards", async (req, res, next) => {
           // (limit:0 for a dry-run count only) until brokenRemaining is 0.
           const maxBroken = Math.min(Number.isFinite(Number(limit)) ? Number(limit) : 20, 50);
       
-          let query = supabase.from("cards").select("*").eq("user_id", user.id).order("id", { ascending: true });
-          if (deckId) query = query.eq("deck_id", deckId);
-          const { data: cards, error } = await query;
-          if (error) throw new Error(`Supabase card load failed: ${error.message}`);
+            // Simon (2026-07-11: "1000 cards scanned?? there arent that many") - real bug caught
+            // here. Supabase/PostgREST caps an unranged select() at a default max-rows (1000),
+            // silently truncating rather than erroring, so any account with more than 1000 card
+            // rows was only ever having its first 1000 (by id) considered - the rest were never
+            // even scanned. Paginate with .range() until a page comes back short of PAGE_SIZE to
+            // guarantee the FULL set is loaded before applying the broken/already-good logic below.
+            const PAGE_SIZE = 1000;
+            let cards = [];
+            for (let from = 0; ; from += PAGE_SIZE) {
+                      let query = supabase
+                                  .from("cards")
+                                  .select("*")
+                                  .eq("user_id", user.id)
+                                  .order("id", { ascending: true })
+                                  .range(from, from + PAGE_SIZE - 1);
+                      if (deckId) query = query.eq("deck_id", deckId);
+                      const { data: page, error } = await query;
+                      if (error) throw new Error(`Supabase card load failed: ${error.message}`);
+                      cards = cards.concat(page || []);
+                      if (!page || page.length < PAGE_SIZE) break;
+            }
       
           const results = { scanned: 0, alreadyGood: 0, repaired: [], mismatched: [], skippedNoEnglish: [], failed: [] };
           let brokenHandled = 0;
