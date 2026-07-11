@@ -516,6 +516,98 @@ async function detectLanguageFromText({
   };
 }
 
+// --- Retrospective repair (Simon, 2026-07-11: "who knows how many times we have looked at
+// the same problem baked in to old cards" / "can't you apply all the new rules and fixes to
+// the existing cards??"). The validation+retry layer above only protects cards generated
+// AFTER it shipped - it does nothing for cards already saved with a gap (empty romaji,
+// empty words breakdown, etc.) from before this existed. This lets existing cards be swept
+// and healed using the exact same rules, without Simon re-recording anything.
+//
+// Safety rules (deliberately mirrors the frontend's existing repairOne() heal logic):
+//   - NEVER overwrite a card's english or japanese text if it is already non-empty - only
+//     fill fields that are genuinely missing. Simon may have already studied/learned the
+//     existing phrasing; this is a gap-fill, not a re-translate.
+//   - If a freshly regenerated sentence doesn't textually match the card's own stored
+//     japanese, its kana/romaji/words are NOT grafted on (they'd describe a different
+//     sentence) - the card is reported as a "mismatch" for manual follow-up instead.
+//   - A fresh words[] breakdown only replaces an existing one if it's at least as complete
+//     (never regresses a card to fewer words than it already had).
+function wordsAreComplete(words) {
+    if (!Array.isArray(words) || !words.length) return false;
+    return words.every(w => String(w?.jp || "").trim() && String(w?.meaning || "").trim());
+}
+
+function cardNeedsRepair(card) {
+    const reasons = [];
+    const japanese = String(card.japanese || "").trim();
+    const kana = String(card.kana || "").trim();
+    const romaji = String(card.romaji || "").trim();
+    const words = Array.isArray(card.words) ? card.words.filter(w => w && String(w.jp || "").trim()) : [];
+  
+    if (!japanese) reasons.push("empty-japanese");
+    if (japanese && !kana) reasons.push("empty-kana");
+    if (japanese && !romaji) reasons.push("empty-romaji");
+    if (!words.length) reasons.push("empty-words");
+    else if (!wordsAreComplete(words)) reasons.push("incomplete-words");
+    return reasons;
+}
+
+async function inferCardLanguage(card) {
+    const existingScript = String(card.japanese || card.kana || "").trim();
+    if (!existingScript) return "ja"; // nothing to go on - matches resolveCardsLanguage's own default
+    if (CJK_RE.test(existingScript)) return "ja"; // CJK script present - overwhelmingly the common case
+    try {
+          const detected = await detectLanguageFromText({ text: existingScript, primaryLanguage: "en" });
+          if (detected.sourceLanguage && detected.sourceLanguage !== "en" && SUPPORTED_LANGUAGES[detected.sourceLanguage]) {
+                  return detected.sourceLanguage;
+          }
+    } catch (e) { /* fall through to default */ }
+    return "ja";
+}
+
+async function repairExistingCard(card) {
+    const reasons = cardNeedsRepair(card);
+    if (!reasons.length) return { changed: false, reasons: [] };
+  
+    const langCode = await inferCardLanguage(card);
+    const [fresh] = await generateFullCards([card.english], langCode);
+  
+    const patch = {};
+    const oldJapanese = String(card.japanese || "").trim();
+    const oldWords = Array.isArray(card.words) ? card.words.filter(w => w && String(w.jp || "").trim()) : [];
+    const freshJapanese = String(fresh.japanese || "").trim();
+    const samePhrasing = oldJapanese && freshJapanese === oldJapanese;
+  
+    if (!oldJapanese) {
+          // Nothing stored to preserve - trust the fresh, already-validated card outright.
+          patch.japanese = fresh.japanese;
+          patch.kana = fresh.kana;
+          patch.romaji = fresh.romaji;
+          patch.words = fresh.words;
+    } else if (samePhrasing) {
+          // Same sentence already on the card - safe to fill genuine gaps, never touch the rest.
+          if (reasons.includes("empty-kana") && fresh.kana) patch.kana = fresh.kana;
+          if (reasons.includes("empty-romaji") && fresh.romaji) patch.romaji = fresh.romaji;
+          if (
+                  (reasons.includes("empty-words") || reasons.includes("incomplete-words")) &&
+                  Array.isArray(fresh.words) && fresh.words.length && fresh.words.length >= oldWords.length
+                ) {
+                  patch.words = fresh.words;
+          }
+    }
+    // else: the regenerated sentence is phrased differently than what's stored - too risky to
+    // graft its kana/romaji/words onto the OLD japanese text. Left untouched, reported below.
+  
+    if (!Object.keys(patch).length) {
+          return { changed: false, reasons, mismatch: Boolean(oldJapanese && !samePhrasing) };
+    }
+  
+    const { error } = await supabase.from("cards").update(patch).eq("id", card.id);
+    if (error) throw new Error(`Supabase card repair save failed: ${error.message}`);
+  
+    return { changed: true, reasons, patchedFields: Object.keys(patch) };
+}
+
 async function saveDeckAndCards({ userId, deckName, cards }) {
   const cleanDeckName = String(deckName || "Untitled folder").trim() || "Untitled folder";
 
@@ -867,6 +959,69 @@ app.post("/capture-audio-fast", upload.single("audio"), async (req, res, next) =
   } catch (err) {
     next(err);
   }
+});
+
+app.post("/repair-existing-cards", async (req, res, next) => {
+    const started = Date.now();
+  
+    try {
+          const user = await getUser(req);
+          const { deckId, limit } = req.body || {};
+          // Bounded per call so a large library can't run into a request timeout - call again
+          // (limit:0 for a dry-run count only) until brokenRemaining is 0.
+          const maxBroken = Math.min(Number.isFinite(Number(limit)) ? Number(limit) : 20, 50);
+      
+          let query = supabase.from("cards").select("*").eq("user_id", user.id).order("id", { ascending: true });
+          if (deckId) query = query.eq("deck_id", deckId);
+          const { data: cards, error } = await query;
+          if (error) throw new Error(`Supabase card load failed: ${error.message}`);
+      
+          const results = { scanned: 0, alreadyGood: 0, repaired: [], mismatched: [], skippedNoEnglish: [], failed: [] };
+          let brokenHandled = 0;
+          let brokenRemaining = 0;
+      
+          for (const card of cards || []) {
+                  results.scanned++;
+                  const reasons = cardNeedsRepair(card);
+                  if (!reasons.length) {
+                            results.alreadyGood++;
+                            continue;
+                  }
+            
+                  if (!String(card.english || "").trim()) {
+                            results.skippedNoEnglish.push({ id: card.id, reasons });
+                            continue;
+                  }
+            
+                  if (brokenHandled >= maxBroken) {
+                            brokenRemaining++;
+                            continue;
+                  }
+                  brokenHandled++;
+            
+                  try {
+                            const outcome = await repairExistingCard(card);
+                            if (outcome.changed) {
+                                        results.repaired.push({ id: card.id, english: card.english, reasons, patchedFields: outcome.patchedFields });
+                            } else if (outcome.mismatch) {
+                                        results.mismatched.push({ id: card.id, english: card.english, reasons });
+                            } else {
+                                        results.failed.push({ id: card.id, english: card.english, reasons, reason: "no fields could be safely filled" });
+                            }
+                  } catch (e) {
+                            results.failed.push({ id: card.id, english: card.english, reasons, reason: (e && e.message) || String(e) });
+                  }
+          }
+      
+          res.json({
+                  ok: true,
+                  ...results,
+                  brokenRemaining,
+                  timings: { totalMs: Date.now() - started }
+          });
+    } catch (err) {
+          next(err);
+    }
 });
 
 app.get("/decks", async (req, res, next) => {
