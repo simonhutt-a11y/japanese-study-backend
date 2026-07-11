@@ -195,169 +195,290 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
   return text;
 }
 
+const CJK_RE = /[぀-ヿ㐀-鿿가-힯]/;
+
+function scriptLooksWrong(text, langCode) {
+    const clean = String(text || "").trim();
+    if (!clean) return false; // emptiness is its own, separate validation failure
+    const code = normalizeLanguageCode(langCode);
+    const isCjkLanguage = code === "ja" || code === "zh" || code === "ko";
+    const hasCjk = CJK_RE.test(clean);
+    if (isCjkLanguage && !hasCjk) return true; // claims a CJK language but has no CJK characters
+    if (!isCjkLanguage && hasCjk) return true; // claims a Latin-alphabet language but has CJK characters
+    return false;
+}
+
+async function generateWithValidation(label, generateFn, validateFn, { maxAttempts = 3 } = {}) {
+    let lastReason = "";
+    let lastResult = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          let result;
+          try {
+                  result = await generateFn();
+          } catch (e) {
+                  lastReason = `attempt threw: ${(e && e.message) || e}`;
+                  console.warn(`${label}: attempt ${attempt}/${maxAttempts} threw`, lastReason);
+                  continue;
+          }
+
+          const verdict = validateFn(result);
+          if (verdict === true) {
+                  if (attempt > 1) {
+                            console.log(`${label}: succeeded on attempt ${attempt}/${maxAttempts} after earlier failure: ${lastReason}`);
+                  }
+                  return result;
+          }
+
+          lastReason = String(verdict || "validation failed");
+          lastResult = result;
+          console.warn(`${label}: attempt ${attempt}/${maxAttempts} failed validation: ${lastReason}`);
+    }
+
+    console.error(`${label}: all ${maxAttempts} attempts failed validation, last reason: ${lastReason}`);
+    const err = new Error("Translation could not be completed accurately - please try again.");
+    err.status = 502;
+    err.lastReason = lastReason;
+    err.lastResult = lastResult;
+    throw err;
+}
+
 async function generateFastCards(sentences, targetLanguage) {
-  const fastLangCode = resolveCardsLanguage(targetLanguage);
-  const fastLangLabel = languageName(fastLangCode);
-  const response = await openai.responses.create({
-        model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
-    instructions: fastLangCode === "ja" ? (
-      "Return only valid JSON. Create fast Japanese travel/conversation study cards. " +
-      "Prioritise speed. No explanations. No markdown. " +
-      "Return natural Japanese, readable Hepburn romaji, and difficulty 1-3. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists. " +
-      "Leave words as an empty array."
-    ) : buildNonJapaneseFastInstructions(fastLangLabel),
-    input:
-      JSON.stringify({
-        sentences,
-        output_shape: {
-          cards: [
-            {
-              english: "",
-              japanese: "",
-              kana: "",
-              romaji: "",
-              difficulty: 2,
-              words: []
-            }
-          ]
-        }
-      })
-  });
+    const fastLangCode = resolveCardsLanguage(targetLanguage);
+    const fastLangLabel = languageName(fastLangCode);
 
-  const parsed = safeJsonParse(response.output_text);
-  if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid fast cards JSON");
+    async function attempt() {
+          const response = await openai.responses.create({
+                      model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
+                  instructions: fastLangCode === "ja" ? (
+                            "Return only valid JSON. Create fast Japanese travel/conversation study cards. " +
+                            "Prioritise speed. No explanations. No markdown. " +
+                            "Return natural Japanese, readable Hepburn romaji, and difficulty 1-3. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists. " +
+                            "Leave words as an empty array."
+                          ) : buildNonJapaneseFastInstructions(fastLangLabel),
+                  input:
+                            JSON.stringify({
+                                        sentences,
+                                        output_shape: {
+                                                      cards: [
+                                                        {
+                                                                          english: "",
+                                                                          japanese: "",
+                                                                          kana: "",
+                                                                          romaji: "",
+                                                                          difficulty: 2,
+                                                                          words: []
+                                                        }
+                                                                    ]
+                                        }
+                            })
+          });
 
-  return parsed.cards.map((card, index) => ({
-    english: card.english || sentences[index] || "",
-    japanese: card.japanese || "",
-    kana: card.kana || card.japanese || "",
-    romaji: card.romaji || "",
-    difficulty: Number(card.difficulty || 2),
-    words: []
-  }));
+          const parsed = safeJsonParse(response.output_text);
+          if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid fast cards JSON");
+
+          return parsed.cards.map((card, index) => ({
+                  english: card.english || sentences[index] || "",
+                  japanese: card.japanese || "",
+                  kana: card.kana || card.japanese || "",
+                  romaji: card.romaji || "",
+                  difficulty: Number(card.difficulty || 2),
+                  words: []
+          }));
+    }
+
+    function validate(cards) {
+          if (!Array.isArray(cards) || cards.length !== sentences.length) return "card count did not match sentence count";
+          for (const card of cards) {
+                  if (!String(card.english || "").trim()) return "a card had an empty english field";
+                  if (!String(card.japanese || "").trim()) return "a card had an empty japanese field";
+                  if (!String(card.romaji || "").trim()) return "a card had an empty romaji field";
+                  if (scriptLooksWrong(card.japanese, fastLangCode)) return "a card's japanese field script did not match the target language";
+          }
+          return true;
+    }
+
+    return generateWithValidation("generateFastCards", attempt, validate);
 }
 
 async function generateInstantTranslation(english) {
-  const response = await openai.responses.create({
-        model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
-    instructions:
-      "Return only valid JSON. Translate the English sentence into natural Japanese for immediate spoken use. " +
-      "Return only japanese and romaji. No explanation. No markdown. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists (a shopping bag is 袋, not バッグ).",
-    input: JSON.stringify({
-      english,
-      output_shape: {
-        japanese: "",
-        romaji: ""
-      }
-    })
-  });
+    async function attempt() {
+          const response = await openai.responses.create({
+                      model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
+                  instructions:
+                            "Return only valid JSON. Translate the English sentence into natural Japanese for immediate spoken use. " +
+                            "Return only japanese and romaji. No explanation. No markdown. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists (a shopping bag is 袋, not バッグ).",
+                  input: JSON.stringify({
+                            english,
+                            output_shape: {
+                                        japanese: "",
+                                        romaji: ""
+                            }
+                  })
+          });
 
-  const parsed = safeJsonParse(response.output_text);
+          const parsed = safeJsonParse(response.output_text);
 
-  return {
-    japanese: parsed.japanese || "",
-    romaji: parsed.romaji || ""
-  };
-}async function generateFullCards(sentences, targetLanguage) {
-  const fullLangCode = resolveCardsLanguage(targetLanguage);
-  const fullLangLabel = languageName(fullLangCode);
-  const response = await openai.responses.create({
-    model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-    instructions: fullLangCode === "ja" ? (
-      "You create Japanese study cards for an English-speaking learner. Return only valid JSON. " +
-      "Keep translations natural and useful for travel/conversation. Kana must be Japanese script. " +
-      "Romaji must be readable Hepburn-style romaji. Difficulty must be 1, 2, or 3. Use the vocabulary a native Japanese speaker would naturally use in the situation the sentence implies, and prefer native words over katakana loanwords when both exist (for a shopping bag say 袋 fukuro, not バッグ). The words array must be a word-by-word breakdown of the EXACT japanese sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english. Every words entry must include jp exactly as written in the sentence, kana giving that word's reading in hiragana exactly as pronounced in this sentence, readable Hepburn romaji, and a short english meaning. The card kana field must be the exact hiragana reading of the japanese field."
-    ) : buildNonJapaneseFullInstructions(fullLangLabel),
-    input:
-      "Create study cards for these English sentences:\n\n" +
-      JSON.stringify(sentences, null, 2) +
-      '\n\nReturn JSON shaped as: {"cards":[{"english":"","japanese":"","kana":"","romaji":"","difficulty":2,"words":[{"jp":"","kana":"","romaji":"","meaning":""}]}]}'
-  });
+          return {
+                  japanese: parsed.japanese || "",
+                  romaji: parsed.romaji || ""
+          };
+    }
 
-  const parsed = safeJsonParse(response.output_text);
-  if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid cards JSON");
-  return parsed.cards;
+    function validate(result) {
+          if (!String(result.japanese || "").trim()) return "empty japanese field";
+          if (!String(result.romaji || "").trim()) return "empty romaji field";
+          if (scriptLooksWrong(result.japanese, "ja")) return "japanese field did not contain Japanese script";
+          return true;
+    }
+
+    return generateWithValidation("generateInstantTranslation", attempt, validate);
+}
+
+async function generateFullCards(sentences, targetLanguage) {
+    const fullLangCode = resolveCardsLanguage(targetLanguage);
+    const fullLangLabel = languageName(fullLangCode);
+
+    async function attempt() {
+          const response = await openai.responses.create({
+                  model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+                  instructions: fullLangCode === "ja" ? (
+                            "You create Japanese study cards for an English-speaking learner. Return only valid JSON. " +
+                            "Keep translations natural and useful for travel/conversation. Kana must be Japanese script. " +
+                            "Romaji must be readable Hepburn-style romaji. Difficulty must be 1, 2, or 3. Use the vocabulary a native Japanese speaker would naturally use in the situation the sentence implies, and prefer native words over katakana loanwords when both exist (for a shopping bag say 袋 fukuro, not バッグ). The words array must be a word-by-word breakdown of the EXACT japanese sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english. Every words entry must include jp exactly as written in the sentence, kana giving that word's reading in hiragana exactly as pronounced in this sentence, readable Hepburn romaji, and a short english meaning. The card kana field must be the exact hiragana reading of the japanese field."
+                          ) : buildNonJapaneseFullInstructions(fullLangLabel),
+                  input:
+                            "Create study cards for these English sentences:\n\n" +
+                            JSON.stringify(sentences, null, 2) +
+                            '\n\nReturn JSON shaped as: {"cards":[{"english":"","japanese":"","kana":"","romaji":"","difficulty":2,"words":[{"jp":"","kana":"","romaji":"","meaning":""}]}]}'
+          });
+
+          const parsed = safeJsonParse(response.output_text);
+          if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid cards JSON");
+          return parsed.cards;
+    }
+
+    function validate(cards) {
+          if (!Array.isArray(cards) || cards.length !== sentences.length) return "card count did not match sentence count";
+          for (const card of cards) {
+                  if (!String(card.english || "").trim()) return "a card had an empty english field";
+                  if (!String(card.japanese || "").trim()) return "a card had an empty japanese field";
+                  if (!String(card.kana || "").trim()) return "a card had an empty kana field";
+                  if (!String(card.romaji || "").trim()) return "a card had an empty romaji field";
+                  if (scriptLooksWrong(card.japanese, fullLangCode)) return "a card's japanese field script did not match the target language";
+                  if (!Array.isArray(card.words) || card.words.length === 0) return "a card had an empty words breakdown";
+                  for (const w of card.words) {
+                            if (!String(w?.jp || "").trim() || !String(w?.meaning || "").trim()) return "a card's words array had an incomplete entry";
+                  }
+          }
+          return true;
+    }
+
+    return generateWithValidation("generateFullCards", attempt, validate);
 }
 
 async function generateConversationTurn({
-  transcript,
-  sourceLanguage,
-  targetLanguage,
-  primaryLanguage,
-  partnerLanguage
-}) {
-  const cleanTranscript = String(transcript || "").trim();
-  const cleanSourceLanguage = normalizeLanguageCode(sourceLanguage);
-  const cleanTargetLanguage = resolveConversationTargetLanguage({
-    sourceLanguage: cleanSourceLanguage,
+    transcript,
+    sourceLanguage,
+    targetLanguage,
     primaryLanguage,
-    partnerLanguage,
-    targetLanguage
-  });
-
-  const response = await openai.responses.create({
-        model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
-    // Simon (2026-07-08): "make it faster" - conversation-translate-text was measured at
-    // ~3.6s end-to-end in production, almost entirely model "thinking" time rather than
-    // network latency. This is a straight translation task with no multi-step reasoning
-    // to do, so minimal reasoning effort should cut latency without changing the actual
-    // translation quality. Reversible: delete this line to go back to the model's default
-    // effort if quality/latency doesn't improve as hoped.
-reasoning: { effort: "none" },    
-    instructions:
-      "Return only valid JSON. You are the WordHole multilingual conversation translator. " +
-      "Translate natural spoken conversation without softening, censoring, moralising, or over-explaining. " +
-      "Preserve the speaker's meaning, tone, directness, slang, profanity, and casual style when possible. " +
-      "A supplied source language and target language, when given, are authoritative - trust them exactly as given and do not silently re-detect or substitute a different language pair. Only detect the source language yourself if none was supplied. Always produce a genuine translation: the translation field must be a real translation of the transcript into the target language, in the target language\u2019s own script/words, and must not simply repeat the transcript text back unmodified, unless source and target are genuinely the same language. " +
-      "For Japanese output, return natural Japanese plus readable Hepburn romaji. " +
-      "For Japanese input, return readable Hepburn romaji for the source transcript. " +
-      "For non-Japanese languages, romaji may be an empty string. " +
-      "Return no markdown and no explanations.",
-    input: JSON.stringify({
-      transcript: cleanTranscript,
-      suppliedSourceLanguage: cleanSourceLanguage || "",
-      sourceLanguageName: languageName(cleanSourceLanguage),
-      targetLanguage: cleanTargetLanguage,
-      targetLanguageName: languageName(cleanTargetLanguage),
-      primaryLanguage: normalizeLanguageCode(primaryLanguage) || "en",
-      partnerLanguage: normalizeLanguageCode(partnerLanguage) || "ja",
-      supportedLanguages: SUPPORTED_LANGUAGE_LIST.map(lang => ({
-        code: lang.code,
-        name: lang.name
-      })),
-      output_shape: {
-        transcript: "",
-        translation: "",
-        sourceLanguage: "",
-        targetLanguage: "",
-        romaji: "",
-        confidence: 0.8
-      }
-    })
-  });
-
-  const parsed = safeJsonParse(response.output_text);
-
-  const finalSourceLanguage = normalizeLanguageCode(parsed.sourceLanguage) || cleanSourceLanguage || "";
-  const finalTargetLanguage =
-    normalizeLanguageCode(parsed.targetLanguage) ||
-    resolveConversationTargetLanguage({
-      sourceLanguage: finalSourceLanguage,
-      primaryLanguage,
-      partnerLanguage,
-      targetLanguage: cleanTargetLanguage
+    partnerLanguage
+}) {
+    const cleanTranscript = String(transcript || "").trim();
+    const cleanSourceLanguage = normalizeLanguageCode(sourceLanguage);
+    const cleanTargetLanguage = resolveConversationTargetLanguage({
+          sourceLanguage: cleanSourceLanguage,
+          primaryLanguage,
+          partnerLanguage,
+          targetLanguage
     });
 
-  return {
-    transcript: parsed.transcript || cleanTranscript,
-    translation: parsed.translation || "",
-    sourceLanguage: finalSourceLanguage,
-    sourceLanguageName: languageName(finalSourceLanguage),
-    targetLanguage: finalTargetLanguage,
-    targetLanguageName: languageName(finalTargetLanguage),
-    romaji: parsed.romaji || "",
-    confidence: Number(parsed.confidence || 0.8)
-  };
+    async function attempt() {
+          const response = await openai.responses.create({
+                      model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
+                  // Simon (2026-07-08): "make it faster" - conversation-translate-text was measured at
+                  // ~3.6s end-to-end in production, almost entirely model "thinking" time rather than
+                  // network latency. This is a straight translation task with no multi-step reasoning
+                  // to do, so minimal reasoning effort should cut latency without changing the actual
+                  // translation quality. Reversible: delete this line to go back to the model's default
+                  // effort if quality/latency doesn't improve as hoped.
+              reasoning: { effort: "none" },
+                  instructions:
+                            "Return only valid JSON. You are the WordHole multilingual conversation translator. " +
+                            "Translate natural spoken conversation without softening, censoring, moralising, or over-explaining. " +
+                            "Preserve the speaker's meaning, tone, directness, slang, profanity, and casual style when possible. " +
+                            "A supplied source language and target language, when given, are authoritative - trust them exactly as given and do not silently re-detect or substitute a different language pair. Only detect the source language yourself if none was supplied. Always produce a genuine translation: the translation field must be a real translation of the transcript into the target language, in the target language’s own script/words, and must not simply repeat the transcript text back unmodified, unless source and target are genuinely the same language. " +
+                            "For Japanese output, return natural Japanese plus readable Hepburn romaji. " +
+                            "For Japanese input, return readable Hepburn romaji for the source transcript. " +
+                            "For non-Japanese languages, romaji may be an empty string. " +
+                            "Return no markdown and no explanations.",
+                  input: JSON.stringify({
+                            transcript: cleanTranscript,
+                            suppliedSourceLanguage: cleanSourceLanguage || "",
+                            sourceLanguageName: languageName(cleanSourceLanguage),
+                            targetLanguage: cleanTargetLanguage,
+                            targetLanguageName: languageName(cleanTargetLanguage),
+                            primaryLanguage: normalizeLanguageCode(primaryLanguage) || "en",
+                            partnerLanguage: normalizeLanguageCode(partnerLanguage) || "ja",
+                            supportedLanguages: SUPPORTED_LANGUAGE_LIST.map(lang => ({
+                                        code: lang.code,
+                                        name: lang.name
+                            })),
+                            output_shape: {
+                                        transcript: "",
+                                        translation: "",
+                                        sourceLanguage: "",
+                                        targetLanguage: "",
+                                        romaji: "",
+                                        confidence: 0.8
+                            }
+                  })
+          });
+
+          const parsed = safeJsonParse(response.output_text);
+
+          const finalSourceLanguage = normalizeLanguageCode(parsed.sourceLanguage) || cleanSourceLanguage || "";
+          const finalTargetLanguage =
+                  normalizeLanguageCode(parsed.targetLanguage) ||
+                  resolveConversationTargetLanguage({
+                            sourceLanguage: finalSourceLanguage,
+                            primaryLanguage,
+                            partnerLanguage,
+                            targetLanguage: cleanTargetLanguage
+                  });
+
+          return {
+                  transcript: parsed.transcript || cleanTranscript,
+                  translation: parsed.translation || "",
+                  sourceLanguage: finalSourceLanguage,
+                  sourceLanguageName: languageName(finalSourceLanguage),
+                  targetLanguage: finalTargetLanguage,
+                  targetLanguageName: languageName(finalTargetLanguage),
+                  romaji: parsed.romaji || "",
+                  confidence: Number(parsed.confidence || 0.8)
+          };
+    }
+
+    function validate(result) {
+          const translation = String(result.translation || "").trim();
+          if (!translation) return "empty translation field";
+          if (result.targetLanguage && scriptLooksWrong(translation, result.targetLanguage)) {
+                  return "translation field script did not match the target language";
+          }
+          if (
+                  result.sourceLanguage && result.targetLanguage &&
+                  result.sourceLanguage !== result.targetLanguage && cleanTranscript &&
+                  translation.toLowerCase() === cleanTranscript.trim().toLowerCase()
+                ) {
+                  return "translation just echoed the transcript unchanged";
+          }
+          if ((result.targetLanguage === "ja" || result.sourceLanguage === "ja") && !String(result.romaji || "").trim()) {
+                  return "missing romaji when Japanese is involved";
+          }
+          return true;
+    }
+
+    return generateWithValidation("generateConversationTurn", attempt, validate);
 }
 
 async function detectLanguageFromText({
@@ -393,6 +514,98 @@ async function detectLanguageFromText({
     sourceLanguage: normalizeLanguageCode(parsed.sourceLanguage) || "",
     confidence: Number(parsed.confidence || 0.8)
   };
+}
+
+// --- Retrospective repair (Simon, 2026-07-11: "who knows how many times we have looked at
+// the same problem baked in to old cards" / "can't you apply all the new rules and fixes to
+// the existing cards??"). The validation+retry layer above only protects cards generated
+// AFTER it shipped - it does nothing for cards already saved with a gap (empty romaji,
+// empty words breakdown, etc.) from before this existed. This lets existing cards be swept
+// and healed using the exact same rules, without Simon re-recording anything.
+//
+// Safety rules (deliberately mirrors the frontend's existing repairOne() heal logic):
+//   - NEVER overwrite a card's english or japanese text if it is already non-empty - only
+//     fill fields that are genuinely missing. Simon may have already studied/learned the
+//     existing phrasing; this is a gap-fill, not a re-translate.
+//   - If a freshly regenerated sentence doesn't textually match the card's own stored
+//     japanese, its kana/romaji/words are NOT grafted on (they'd describe a different
+//     sentence) - the card is reported as a "mismatch" for manual follow-up instead.
+//   - A fresh words[] breakdown only replaces an existing one if it's at least as complete
+//     (never regresses a card to fewer words than it already had).
+function wordsAreComplete(words) {
+    if (!Array.isArray(words) || !words.length) return false;
+    return words.every(w => String(w?.jp || "").trim() && String(w?.meaning || "").trim());
+}
+
+function cardNeedsRepair(card) {
+    const reasons = [];
+    const japanese = String(card.japanese || "").trim();
+    const kana = String(card.kana || "").trim();
+    const romaji = String(card.romaji || "").trim();
+    const words = Array.isArray(card.words) ? card.words.filter(w => w && String(w.jp || "").trim()) : [];
+  
+    if (!japanese) reasons.push("empty-japanese");
+    if (japanese && !kana) reasons.push("empty-kana");
+    if (japanese && !romaji) reasons.push("empty-romaji");
+    if (!words.length) reasons.push("empty-words");
+    else if (!wordsAreComplete(words)) reasons.push("incomplete-words");
+    return reasons;
+}
+
+async function inferCardLanguage(card) {
+    const existingScript = String(card.japanese || card.kana || "").trim();
+    if (!existingScript) return "ja"; // nothing to go on - matches resolveCardsLanguage's own default
+    if (CJK_RE.test(existingScript)) return "ja"; // CJK script present - overwhelmingly the common case
+    try {
+          const detected = await detectLanguageFromText({ text: existingScript, primaryLanguage: "en" });
+          if (detected.sourceLanguage && detected.sourceLanguage !== "en" && SUPPORTED_LANGUAGES[detected.sourceLanguage]) {
+                  return detected.sourceLanguage;
+          }
+    } catch (e) { /* fall through to default */ }
+    return "ja";
+}
+
+async function repairExistingCard(card) {
+    const reasons = cardNeedsRepair(card);
+    if (!reasons.length) return { changed: false, reasons: [] };
+  
+    const langCode = await inferCardLanguage(card);
+    const [fresh] = await generateFullCards([card.english], langCode);
+  
+    const patch = {};
+    const oldJapanese = String(card.japanese || "").trim();
+    const oldWords = Array.isArray(card.words) ? card.words.filter(w => w && String(w.jp || "").trim()) : [];
+    const freshJapanese = String(fresh.japanese || "").trim();
+    const samePhrasing = oldJapanese && freshJapanese === oldJapanese;
+  
+    if (!oldJapanese) {
+          // Nothing stored to preserve - trust the fresh, already-validated card outright.
+          patch.japanese = fresh.japanese;
+          patch.kana = fresh.kana;
+          patch.romaji = fresh.romaji;
+          patch.words = fresh.words;
+    } else if (samePhrasing) {
+          // Same sentence already on the card - safe to fill genuine gaps, never touch the rest.
+          if (reasons.includes("empty-kana") && fresh.kana) patch.kana = fresh.kana;
+          if (reasons.includes("empty-romaji") && fresh.romaji) patch.romaji = fresh.romaji;
+          if (
+                  (reasons.includes("empty-words") || reasons.includes("incomplete-words")) &&
+                  Array.isArray(fresh.words) && fresh.words.length && fresh.words.length >= oldWords.length
+                ) {
+                  patch.words = fresh.words;
+          }
+    }
+    // else: the regenerated sentence is phrased differently than what's stored - too risky to
+    // graft its kana/romaji/words onto the OLD japanese text. Left untouched, reported below.
+  
+    if (!Object.keys(patch).length) {
+          return { changed: false, reasons, mismatch: Boolean(oldJapanese && !samePhrasing) };
+    }
+  
+    const { error } = await supabase.from("cards").update(patch).eq("id", card.id);
+    if (error) throw new Error(`Supabase card repair save failed: ${error.message}`);
+  
+    return { changed: true, reasons, patchedFields: Object.keys(patch) };
 }
 
 async function saveDeckAndCards({ userId, deckName, cards }) {
@@ -746,6 +959,69 @@ app.post("/capture-audio-fast", upload.single("audio"), async (req, res, next) =
   } catch (err) {
     next(err);
   }
+});
+
+app.post("/repair-existing-cards", async (req, res, next) => {
+    const started = Date.now();
+  
+    try {
+          const user = await getUser(req);
+          const { deckId, limit } = req.body || {};
+          // Bounded per call so a large library can't run into a request timeout - call again
+          // (limit:0 for a dry-run count only) until brokenRemaining is 0.
+          const maxBroken = Math.min(Number.isFinite(Number(limit)) ? Number(limit) : 20, 50);
+      
+          let query = supabase.from("cards").select("*").eq("user_id", user.id).order("id", { ascending: true });
+          if (deckId) query = query.eq("deck_id", deckId);
+          const { data: cards, error } = await query;
+          if (error) throw new Error(`Supabase card load failed: ${error.message}`);
+      
+          const results = { scanned: 0, alreadyGood: 0, repaired: [], mismatched: [], skippedNoEnglish: [], failed: [] };
+          let brokenHandled = 0;
+          let brokenRemaining = 0;
+      
+          for (const card of cards || []) {
+                  results.scanned++;
+                  const reasons = cardNeedsRepair(card);
+                  if (!reasons.length) {
+                            results.alreadyGood++;
+                            continue;
+                  }
+            
+                  if (!String(card.english || "").trim()) {
+                            results.skippedNoEnglish.push({ id: card.id, reasons });
+                            continue;
+                  }
+            
+                  if (brokenHandled >= maxBroken) {
+                            brokenRemaining++;
+                            continue;
+                  }
+                  brokenHandled++;
+            
+                  try {
+                            const outcome = await repairExistingCard(card);
+                            if (outcome.changed) {
+                                        results.repaired.push({ id: card.id, english: card.english, reasons, patchedFields: outcome.patchedFields });
+                            } else if (outcome.mismatch) {
+                                        results.mismatched.push({ id: card.id, english: card.english, reasons });
+                            } else {
+                                        results.failed.push({ id: card.id, english: card.english, reasons, reason: "no fields could be safely filled" });
+                            }
+                  } catch (e) {
+                            results.failed.push({ id: card.id, english: card.english, reasons, reason: (e && e.message) || String(e) });
+                  }
+          }
+      
+          res.json({
+                  ok: true,
+                  ...results,
+                  brokenRemaining,
+                  timings: { totalMs: Date.now() - started }
+          });
+    } catch (err) {
+          next(err);
+    }
 });
 
 app.get("/decks", async (req, res, next) => {
