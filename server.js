@@ -1341,6 +1341,7 @@ app.post("/consolidate-library", async (req, res, next) => {
                                                     const { error } = await supabase.from("decks").delete().in("id", batch);
                                                     if (error) throw new Error(`Supabase deck delete failed (batch starting at ${i}): ${error.message}`);
                               }
+          }
 
           res.json({
                   ok: true,
