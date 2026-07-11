@@ -674,6 +674,147 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
   return { deck, cards: savedCards || [] };
 }
 
+// Simon (2026-07-11: "please find all of the duplicates and get rid of them. the only
+// cards that should be in existence are those in the folders for each persons login"):
+// pure planning helpers for the library-consolidation endpoint below. Kept as pure
+// functions (no Supabase calls) so the whole plan can be unit tested without any
+// database mocking - the endpoint just loads everything (already-paginated) and hands it
+// to buildConsolidationPlan(), which decides what would change without touching anything.
+function normalizeEnglishKey(text) {
+    return String(text || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function cardCompleteness(card) {
+    let score = 0;
+    if (String(card.japanese || "").trim()) score++;
+    if (String(card.kana || "").trim()) score++;
+    if (String(card.romaji || "").trim()) score++;
+    if (Array.isArray(card.words) && card.words.length) score += card.words.length;
+    return score;
+}
+
+function buildConsolidationPlan(decks, cards) {
+    // 1. Group decks by (user_id, name) - the fragmentation bug (514 decks / ~24 real names).
+    // The earliest-created deck in each group becomes canonical; every other deck in the
+    // group is a duplicate to be emptied out and deleted.
+    const deckGroups = new Map();
+    for (const deck of decks) {
+          const key = `${deck.user_id}|${String(deck.name || "").trim()}`;
+          if (!deckGroups.has(key)) deckGroups.set(key, []);
+          deckGroups.get(key).push(deck);
+    }
+  
+    const deckIdToCanonical = new Map();
+    const canonicalDeckIds = new Set();
+    const decksToDelete = [];
+  
+    for (const group of deckGroups.values()) {
+          const sorted = group.slice().sort((a, b) => {
+                  const at = new Date(a.created_at).getTime();
+                  const bt = new Date(b.created_at).getTime();
+                  if (at !== bt) return at - bt;
+                  return a.id - b.id;
+          });
+          const canonical = sorted[0];
+          canonicalDeckIds.add(canonical.id);
+          for (const d of sorted) {
+                  deckIdToCanonical.set(d.id, canonical);
+                  if (d.id !== canonical.id) decksToDelete.push(d.id);
+          }
+    }
+  
+    // 2. Resolve every card to its canonical deck. Cards whose deck_id doesn't match any
+    // loaded deck are reported as orphans and left completely untouched rather than guessed at.
+    const cardsByCanonicalDeck = new Map();
+    const orphanCards = [];
+  
+    for (const card of cards) {
+          const canonical = deckIdToCanonical.get(card.deck_id);
+          if (!canonical) {
+                  orphanCards.push(card);
+                  continue;
+          }
+          if (!cardsByCanonicalDeck.has(canonical.id)) cardsByCanonicalDeck.set(canonical.id, []);
+          cardsByCanonicalDeck.get(canonical.id).push(card);
+    }
+  
+    // 3. Within each canonical deck, de-duplicate by the user's actual English sentence -
+    // the one field that's invariant across every duplicate-creating heal/Fix retry, since
+    // it's what the user actually typed/said. Keep the most COMPLETE copy (japanese/kana/
+    // romaji/words filled in - i.e. the one a heal actually succeeded on), tie-broken by
+    // whichever was saved first.
+    const cardReassignments = [];
+    const cardsToDelete = [];
+    const duplicateGroups = [];
+  
+    for (const [canonicalDeckId, deckCards] of cardsByCanonicalDeck) {
+          const byEnglish = new Map();
+          for (const card of deckCards) {
+                  const ek = normalizeEnglishKey(card.english);
+                  if (!byEnglish.has(ek)) byEnglish.set(ek, []);
+                  byEnglish.get(ek).push(card);
+          }
+      
+          const orderedGroups = Array.from(byEnglish.values()).sort((a, b) => {
+                  const aMin = Math.min(...a.map(c => (Number.isFinite(c.position) ? c.position : 0)));
+                  const bMin = Math.min(...b.map(c => (Number.isFinite(c.position) ? c.position : 0)));
+                  return aMin - bMin;
+          });
+      
+          let nextPosition = 0;
+          for (const group of orderedGroups) {
+                  let keep = group[0];
+                  if (group.length > 1) {
+                            keep = group.slice().sort((a, b) => {
+                                        const scoreDiff = cardCompleteness(b) - cardCompleteness(a);
+                                        if (scoreDiff !== 0) return scoreDiff;
+                                        return a.id - b.id;
+                            })[0];
+                            const deletedIds = group.filter(c => c.id !== keep.id).map(c => c.id);
+                            duplicateGroups.push({ english: keep.english, deckId: canonicalDeckId, keptId: keep.id, deletedIds });
+                            cardsToDelete.push(...deletedIds);
+                  }
+            
+                  if (keep.deck_id !== canonicalDeckId || keep.position !== nextPosition) {
+                            cardReassignments.push({ cardId: keep.id, newDeckId: canonicalDeckId, newPosition: nextPosition });
+                  }
+                  nextPosition++;
+          }
+    }
+  
+    const summary = {
+          decksBefore: decks.length,
+          decksAfter: canonicalDeckIds.size,
+          decksToDelete: decksToDelete.length,
+          cardsBefore: cards.length,
+          cardsToDelete: cardsToDelete.length,
+          cardsAfter: cards.length - cardsToDelete.length,
+          orphanCardCount: orphanCards.length,
+          topDuplicates: duplicateGroups
+                  .map(g => ({ english: g.english, duplicateCount: g.deletedIds.length + 1 }))
+                  .sort((a, b) => b.duplicateCount - a.duplicateCount)
+                  .slice(0, 20)
+    };
+  
+    return { cardReassignments, cardsToDelete, decksToDelete, orphanCards, summary };
+}
+
+async function loadAllRows(table, extraSelect) {
+    const PAGE_SIZE = 1000;
+    let rows = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+          const { data: page, error } = await supabase
+                  .from(table)
+                  .select(extraSelect || "*")
+                  .order("id", { ascending: true })
+                  .range(from, from + PAGE_SIZE - 1);
+          if (error) throw new Error(`Supabase ${table} load failed: ${error.message}`);
+          rows = rows.concat(page || []);
+          if (!page || page.length < PAGE_SIZE) break;
+    }
+    return rows;
+}
+
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -1114,23 +1255,97 @@ app.post("/repair-existing-cards", async (req, res, next) => {
     }
 });
 
+// Simon (2026-07-11: flagged after the pagination fix above - a live dry-run scan found
+// 18,713 real card rows, but this endpoint's own nested "cards(*)" embed was only ever
+// returning 8,496 of them): the same "silently caps rows rather than erroring" pattern as
+// the fixed /repair-existing-cards bug, just showing up in a nested embed instead of a
+// top-level select. Fetch decks and cards as two separately-paginated queries and join
+// them in JS instead of trusting Supabase to return every embedded card for every deck.
 app.get("/decks", async (req, res, next) => {
-  try {
-    const user = await getUser(req);
+    try {
+          const user = await getUser(req);
 
-    const { data, error } = await supabase
-      .from("decks")
-      .select("*, cards(*)")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false });
+          const { data: decks, error: decksError } = await supabase
+            .from("decks")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("created_at", { ascending: false });
 
-    if (error) throw new Error(`Supabase deck load failed: ${error.message}`);
+          if (decksError) throw new Error(`Supabase deck load failed: ${decksError.message}`);
 
-    res.json({ ok: true, decks: data || [] });
-  } catch (err) {
-    next(err);
-  }
+          const cards = await loadAllRows("cards", "*").then(rows => rows.filter(c => c.user_id === user.id));
+
+          const cardsByDeck = new Map();
+          for (const card of cards) {
+                  if (!cardsByDeck.has(card.deck_id)) cardsByDeck.set(card.deck_id, []);
+                  cardsByDeck.get(card.deck_id).push(card);
+          }
+
+          const decksWithCards = (decks || []).map(deck => ({
+                  ...deck,
+                  cards: (cardsByDeck.get(deck.id) || []).sort((a, b) => (a.position || 0) - (b.position || 0))
+          }));
+
+          res.json({ ok: true, decks: decksWithCards });
+    } catch (err) {
+          next(err);
+    }
 });
+
+// Simon (2026-07-11: "please find all of the duplicates and get rid of them. the only
+// cards that should be in existence are those in the folders for each persons login"):
+// dry-run by default (returns exactly what WOULD change, touches nothing) - pass
+// { execute: true } to actually apply it. This is intentionally NOT scoped to the calling
+// user: the duplication bug hit every account, and the whole point is "get rid of them"
+// system-wide, so it loads every deck/card row (via the same safe pagination as the repair
+// endpoint above) and processes each user's data independently (see buildConsolidationPlan -
+// grouping is always keyed by user_id, so no two logins' decks or cards are ever merged).
+app.post("/consolidate-library", async (req, res, next) => {
+    const started = Date.now();
+
+    try {
+          await getUser(req); // require *a* valid login to call this at all
+          const { execute } = req.body || {};
+          const doExecute = execute === true;
+
+          const [decks, cards] = await Promise.all([
+                  loadAllRows("decks", "*"),
+                  loadAllRows("cards", "*")
+                ]);
+
+          const plan = buildConsolidationPlan(decks, cards);
+
+          if (doExecute) {
+                  for (const r of plan.cardReassignments) {
+                            const { error } = await supabase
+                              .from("cards")
+                              .update({ deck_id: r.newDeckId, position: r.newPosition })
+                              .eq("id", r.cardId);
+                            if (error) throw new Error(`Supabase card reassign failed (id ${r.cardId}): ${error.message}`);
+                  }
+
+                  if (plan.cardsToDelete.length) {
+                            const { error } = await supabase.from("cards").delete().in("id", plan.cardsToDelete);
+                            if (error) throw new Error(`Supabase card delete failed: ${error.message}`);
+                  }
+
+                  if (plan.decksToDelete.length) {
+                            const { error } = await supabase.from("decks").delete().in("id", plan.decksToDelete);
+                            if (error) throw new Error(`Supabase deck delete failed: ${error.message}`);
+                  }
+          }
+
+          res.json({
+                  ok: true,
+                  executed: doExecute,
+                  summary: plan.summary,
+                  timings: { totalMs: Date.now() - started }
+          });
+    } catch (err) {
+          next(err);
+    }
+});
+
 
 app.use((err, req, res, next) => {
   console.error(err);
