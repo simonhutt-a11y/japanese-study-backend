@@ -799,15 +799,24 @@ function buildConsolidationPlan(decks, cards) {
     return { cardReassignments, cardsToDelete, decksToDelete, orphanCards, summary };
 }
 
-async function loadAllRows(table, extraSelect) {
-    const PAGE_SIZE = 1000;
-    let rows = [];
-    for (let from = 0; ; from += PAGE_SIZE) {
-          const { data: page, error } = await supabase
-                  .from(table)
-                  .select(extraSelect || "*")
-                  .order("id", { ascending: true })
-                  .range(from, from + PAGE_SIZE - 1);
+// Simon (2026-07-11: "if this was scaled up to 100 users... would it slow down?"): loadAllRows
+// used to have no way to filter server-side, so /decks called it unfiltered for "cards" and
+// threw away every other user's rows in JS afterwards - meaning every single page load
+// re-downloaded the ENTIRE cards table regardless of whose account was asking. That's fine at
+// today's size but gets linearly slower for EVERY user as the total across ALL accounts grows.
+// Added an optional filterFn so callers can push a .eq(...)/.in(...) filter down into the
+// actual Postgres query - Supabase/Postgres does the filtering, not this Node process - while
+// still paginating past the 1000-row cap for any one user's own (still-possibly-large) result.
+async function loadAllRows(table, extraSelect, filterFn) {
+      const PAGE_SIZE = 1000;
+      let rows = [];
+      for (let from = 0; ; from += PAGE_SIZE) {
+                  let query = supabase
+                                      .from(table)
+                                      .select(extraSelect || "*")
+                                      .order("id", { ascending: true });
+                  if (typeof filterFn === "function") query = filterFn(query);
+                  const { data: page, error } = await query.range(from, from + PAGE_SIZE - 1);
           if (error) throw new Error(`Supabase ${table} load failed: ${error.message}`);
           rows = rows.concat(page || []);
           if (!page || page.length < PAGE_SIZE) break;
@@ -1273,8 +1282,10 @@ app.get("/decks", async (req, res, next) => {
 
           if (decksError) throw new Error(`Supabase deck load failed: ${decksError.message}`);
 
-          const cards = await loadAllRows("cards", "*").then(rows => rows.filter(c => c.user_id === user.id));
-
+          // Filter server-side (mirrors the decks query above) instead of loading every user's
+          // cards into this process and discarding the ones that aren't ours.
+                const cards = await loadAllRows("cards", "*", q => q.eq("user_id", user.id));
+      
           const cardsByDeck = new Map();
           for (const card of cards) {
                   if (!cardsByDeck.has(card.deck_id)) cardsByDeck.set(card.deck_id, []);
