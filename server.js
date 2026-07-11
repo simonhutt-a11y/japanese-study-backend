@@ -1324,15 +1324,23 @@ app.post("/consolidate-library", async (req, res, next) => {
                             if (error) throw new Error(`Supabase card reassign failed (id ${r.cardId}): ${error.message}`);
                   }
 
-                  if (plan.cardsToDelete.length) {
-                            const { error } = await supabase.from("cards").delete().in("id", plan.cardsToDelete);
-                            if (error) throw new Error(`Supabase card delete failed: ${error.message}`);
-                  }
+                  // Simon (2026-07-11: first real execute run hit "414 Request-URI Too Large" from
+                              // Cloudflare - PostgREST's .in("id", [...]) filter is sent as a URL query string,
+                              // and with 18,189 ids in one call the URL itself became too long. Deleting is
+                              // idempotent (already-deleted ids just match 0 rows), so batching this into small
+                              // chunks is completely safe even if a previous attempt partially got through.
+                              const DELETE_BATCH_SIZE = 200;
+                              for (let i = 0; i < plan.cardsToDelete.length; i += DELETE_BATCH_SIZE) {
+                                                    const batch = plan.cardsToDelete.slice(i, i + DELETE_BATCH_SIZE);
+                                                    const { error } = await supabase.from("cards").delete().in("id", batch);
+                                                    if (error) throw new Error(`Supabase card delete failed (batch starting at ${i}): ${error.message}`);
+                              }
 
-                  if (plan.decksToDelete.length) {
-                            const { error } = await supabase.from("decks").delete().in("id", plan.decksToDelete);
-                            if (error) throw new Error(`Supabase deck delete failed: ${error.message}`);
-                  }
+                              for (let i = 0; i < plan.decksToDelete.length; i += DELETE_BATCH_SIZE) {
+                                                    const batch = plan.decksToDelete.slice(i, i + DELETE_BATCH_SIZE);
+                                                    const { error } = await supabase.from("decks").delete().in("id", batch);
+                                                    if (error) throw new Error(`Supabase deck delete failed (batch starting at ${i}): ${error.message}`);
+                              }
           }
 
           res.json({
