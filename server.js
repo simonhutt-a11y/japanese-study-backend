@@ -215,7 +215,11 @@ async function generateWithValidation(label, generateFn, validateFn, { maxAttemp
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           let result;
           try {
-                  result = await generateFn();
+                  // Pass the attempt number through so a generateFn can choose to try harder
+                  // (e.g. escalate reasoning effort) on a retry rather than just re-rolling
+            // identical odds of failure. Existing generateFn implementations that take
+            // no parameters simply ignore this.
+            result = await generateFn(attempt);
           } catch (e) {
                   lastReason = `attempt threw: ${(e && e.message) || e}`;
                   console.warn(`${label}: attempt ${attempt}/${maxAttempts} threw`, lastReason);
@@ -393,7 +397,7 @@ async function generateConversationTurn({
           targetLanguage
     });
 
-    async function attempt() {
+    async function attempt(attemptNumber) {
           const response = await openai.responses.create({
                       model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
                   // Simon (2026-07-08): "make it faster" - conversation-translate-text was measured at
@@ -402,7 +406,14 @@ async function generateConversationTurn({
                   // to do, so minimal reasoning effort should cut latency without changing the actual
                   // translation quality. Reversible: delete this line to go back to the model's default
                   // effort if quality/latency doesn't improve as hoped.
-              reasoning: { effort: "none" },
+                              //
+                              // Simon (2026-07-12): "if it doesn't understand then it just fails rather than a
+                              // retry?" - a retry with the SAME minimal effort was just re-rolling identical odds
+                              // of coming back empty/malformed again. Keep effort "none" only on the first, fast
+                              // attempt; any retry escalates to the model's default reasoning effort instead, so a
+                              // bad first roll gets a genuinely more careful second attempt rather than another
+                              // spin of the same low-effort die.
+              ...(attemptNumber === 1 ? { reasoning: { effort: "none" } } : {}),
                   instructions:
                             "Return only valid JSON. You are the WordHole multilingual conversation translator. " +
                             "Translate natural spoken conversation without softening, censoring, moralising, or over-explaining. " +
