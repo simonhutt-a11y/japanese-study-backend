@@ -109,6 +109,17 @@ function resolveCardsLanguage(targetLanguage) {
   const normalized = normalizeLanguageCode(targetLanguage);
   return SUPPORTED_LANGUAGES[normalized] ? normalized : "ja";
 }
+// 12.1 (Simon: "looking at korean - is there an equivalent of romanji so i can read how to
+// say words?? / it is Hangul romanization and i want it added to korean in the same way
+// romanji is with japanese"): these two builders used to handle EVERY non-Japanese
+// language, including Korean - telling the model Korean's romaji field should just repeat
+// the "japanese" (Hangul) field verbatim "since [language] already uses the Latin
+// alphabet". That's true for Italian/French/German/Spanish/etc, but factually wrong for
+// Korean: Hangul is not the Latin alphabet, so a learner gets no pronunciation help at all
+// under the old instructions. Korean now gets its own branch (buildKoreanFastInstructions/
+// buildKoreanFullInstructions below) requesting genuine Revised Romanization of Korean,
+// the same way Japanese gets genuine Hepburn romaji - these two builders remain for the
+// languages where "romaji repeats the original text" is actually correct.
 function buildNonJapaneseFastInstructions(langLabel) {
   return "Return only valid JSON. Create fast " + langLabel + " travel/conversation study cards for an English-speaking learner. " +
     "Prioritise speed. No explanations. No markdown. " +
@@ -118,6 +129,21 @@ function buildNonJapaneseFastInstructions(langLabel) {
 function buildNonJapaneseFullInstructions(langLabel) {
   return "You create " + langLabel + " study cards for an English-speaking learner. Return only valid JSON. " +
     "Keep translations natural and useful for travel/conversation. The \"japanese\" field must contain the natural " + langLabel + " translation (despite its name, this field always holds whichever language is being studied, not literally Japanese). The \"kana\" field should repeat that same " + langLabel + " text exactly - no script conversion is needed for this language. The \"romaji\" field must repeat the \"japanese\" field text EXACTLY, character-for-character - no pronunciation stress marks, syllable breaks, phonetic respelling, or capitalization changes, since " + langLabel + " already uses the Latin alphabet. Difficulty must be 1, 2, or 3. Use the vocabulary a native speaker would naturally use in the situation the sentence implies. The words array must be a word-by-word (or short natural phrase) breakdown of the EXACT " + langLabel + " sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english sentence. Every words entry must include jp (the " + langLabel + " word or phrase exactly as written in the sentence - despite the field name, not literally Japanese), kana (repeat jp - no separate reading needed for this language), romaji (repeat jp EXACTLY, character-for-character - no stress marks, syllable breaks, or capitalization changes), and a short english meaning. The card kana field must exactly match the japanese field for this language.";
+}
+// Korean: Hangul ("japanese" field, despite the name) is the real script; "kana" repeats it
+// unchanged (Korean has no separate reading/bridging script the way Kanji needs Kana), and
+// "romaji" now holds genuine Revised Romanization of Korean (the modern South Korean
+// government standard, e.g. 안녕하세요 -> annyeonghaseyo) instead of a verbatim Hangul
+// copy - giving Korean the same pronunciation-guide role Hepburn romaji gives Japanese.
+function buildKoreanFastInstructions() {
+  return "Return only valid JSON. Create fast Korean travel/conversation study cards for an English-speaking learner. " +
+    "Prioritise speed. No explanations. No markdown. " +
+    "The \"japanese\" field must hold the natural Korean translation, written in Hangul (despite its name, this field always holds whichever language is being studied). The \"romaji\" field must be that same sentence's pronunciation written in Revised Romanization of Korean (the modern South Korean government standard) - genuinely transliterated Latin letters a learner can read aloud, NEVER a copy of the Hangul text. Difficulty 1-3. " +
+    "Leave words as an empty array.";
+}
+function buildKoreanFullInstructions() {
+  return "You create Korean study cards for an English-speaking learner. Return only valid JSON. " +
+    "Keep translations natural and useful for travel/conversation. The \"japanese\" field must contain the natural Korean translation, written in Hangul (despite its name, this field always holds whichever language is being studied, not literally Japanese). The \"kana\" field should repeat that same Hangul text exactly - Korean has no separate bridging reading script the way Japanese needs kana for kanji. The \"romaji\" field must be genuine Revised Romanization of Korean for that sentence (the modern South Korean government standard, e.g. 안녕하세요 -> annyeonghaseyo) - real transliterated Latin letters a learner can read aloud, NEVER a copy of the Hangul text. Difficulty must be 1, 2, or 3. Use the vocabulary a native speaker would naturally use in the situation the sentence implies. The words array must be a word-by-word (or short natural phrase) breakdown of the EXACT Korean sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english sentence. Every words entry must include jp (the Korean word or phrase exactly as written in the sentence, in Hangul - despite the field name, not literally Japanese), kana (repeat jp - no separate reading needed), romaji (that word's own Revised Romanization, real transliterated Latin letters, never a Hangul copy), and a short english meaning. The card kana field must exactly match the japanese field.";
 }
 
 function resolveConversationTargetLanguage({ sourceLanguage, primaryLanguage, partnerLanguage, targetLanguage }) {
@@ -250,6 +276,16 @@ async function generateWithValidation(label, generateFn, validateFn, { maxAttemp
 async function generateFastCards(sentences, targetLanguage) {
     const fastLangCode = resolveCardsLanguage(targetLanguage);
     const fastLangLabel = languageName(fastLangCode);
+    // Simon reported two different submitted words/phrases ("tomorrow" and "near to here")
+    // coming back with an identical translation. Root cause: this batch call sends N
+    // sentences in one shot and trusts the model's Nth returned card corresponds to the Nth
+    // submitted sentence, with no check that's actually true - a model that reorders, merges,
+    // or duplicates entries under the count would sail through validate() undetected, since
+    // it only checked each card's OWN fields were non-empty, never that it matched what was
+    // actually asked for at that position. lastRawCards captures what the model itself
+    // returned (before the position-based `english` fallback below papers over a missing
+    // echo) so validate() can catch a real mismatch instead of it being silently overwritten.
+    let lastRawCards = null;
 
     async function attempt() {
           const response = await openai.responses.create({
@@ -259,7 +295,7 @@ async function generateFastCards(sentences, targetLanguage) {
                             "Prioritise speed. No explanations. No markdown. " +
                             "Return natural Japanese, readable Hepburn romaji, and difficulty 1-3. Prefer the vocabulary a native speaker would use in the implied situation; avoid katakana loanwords when a natural native word exists. " +
                             "Leave words as an empty array."
-                          ) : buildNonJapaneseFastInstructions(fastLangLabel),
+                          ) : fastLangCode === "ko" ? buildKoreanFastInstructions() : buildNonJapaneseFastInstructions(fastLangLabel),
                   input:
                             JSON.stringify({
                                         sentences,
@@ -280,6 +316,7 @@ async function generateFastCards(sentences, targetLanguage) {
 
           const parsed = safeJsonParse(response.output_text);
           if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid fast cards JSON");
+          lastRawCards = parsed.cards;
 
           return parsed.cards.map((card, index) => ({
                   english: card.english || sentences[index] || "",
@@ -293,11 +330,37 @@ async function generateFastCards(sentences, targetLanguage) {
 
     function validate(cards) {
           if (!Array.isArray(cards) || cards.length !== sentences.length) return "card count did not match sentence count";
-          for (const card of cards) {
+          for (let i = 0; i < cards.length; i++) {
+                  const card = cards[i];
                   if (!String(card.english || "").trim()) return "a card had an empty english field";
                   if (!String(card.japanese || "").trim()) return "a card had an empty japanese field";
                   if (!String(card.romaji || "").trim()) return "a card had an empty romaji field";
                   if (scriptLooksWrong(card.japanese, fastLangCode)) return "a card's japanese field script did not match the target language";
+                  // 12.1: Korean's romaji field must be genuine Revised Romanization, not a
+                  // copy of the Hangul - catch the model ignoring buildKoreanFastInstructions
+                  // and falling back to its old "just repeat the original text" habit.
+                  if (fastLangCode === "ko" && CJK_RE.test(String(card.romaji || ""))) return "a Korean card's romaji field contained Hangul instead of romanization";
+                  // Check the MODEL'S OWN echoed english (before the position-based fallback
+                  // above could have papered over a missing/wrong one) against what was actually
+                  // submitted at this position - a mismatch means the model reordered, merged, or
+                  // dropped sentences internally, so this card's translation may not belong to the
+                  // sentence the frontend thinks it does.
+                  const rawEnglish = lastRawCards && lastRawCards[i] ? String(lastRawCards[i].english || "").trim() : "";
+                  if (rawEnglish && normalizeEnglishKey(rawEnglish) !== normalizeEnglishKey(sentences[i])) {
+                          return `card ${i} echoed a different sentence than submitted ("${rawEnglish}" vs "${sentences[i]}")`;
+                  }
+          }
+          // Two different input sentences must never produce a byte-identical translation -
+          // this is the exact symptom reported (two different words showing the same
+          // translation): the model duplicated one card's content to fill out the count.
+          const seen = new Map();
+          for (let i = 0; i < cards.length; i++) {
+                  const key = normalizeEnglishKey(cards[i].japanese);
+                  if (!key) continue;
+                  if (seen.has(key) && normalizeEnglishKey(sentences[i]) !== normalizeEnglishKey(sentences[seen.get(key)])) {
+                          return `cards ${seen.get(key)} and ${i} produced identical translations for different input sentences ("${sentences[seen.get(key)]}" vs "${sentences[i]}")`;
+                  }
+                  seen.set(key, i);
           }
           return true;
     }
@@ -350,7 +413,7 @@ async function generateFullCards(sentences, targetLanguage) {
                             "You create Japanese study cards for an English-speaking learner. Return only valid JSON. " +
                             "Keep translations natural and useful for travel/conversation. Kana must be Japanese script. " +
                             "Romaji must be readable Hepburn-style romaji. Difficulty must be 1, 2, or 3. Use the vocabulary a native Japanese speaker would naturally use in the situation the sentence implies, and prefer native words over katakana loanwords when both exist (for a shopping bag say 袋 fukuro, not バッグ). The words array must be a word-by-word breakdown of the EXACT japanese sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english. Every words entry must include jp exactly as written in the sentence, kana giving that word's reading in hiragana exactly as pronounced in this sentence, readable Hepburn romaji, and a short english meaning. The card kana field must be the exact hiragana reading of the japanese field."
-                          ) : buildNonJapaneseFullInstructions(fullLangLabel),
+                          ) : fullLangCode === "ko" ? buildKoreanFullInstructions() : buildNonJapaneseFullInstructions(fullLangLabel),
                   input:
                             "Create study cards for these English sentences:\n\n" +
                             JSON.stringify(sentences, null, 2) +
@@ -364,16 +427,39 @@ async function generateFullCards(sentences, targetLanguage) {
 
     function validate(cards) {
           if (!Array.isArray(cards) || cards.length !== sentences.length) return "card count did not match sentence count";
-          for (const card of cards) {
+          for (let i = 0; i < cards.length; i++) {
+                  const card = cards[i];
                   if (!String(card.english || "").trim()) return "a card had an empty english field";
                   if (!String(card.japanese || "").trim()) return "a card had an empty japanese field";
                   if (!String(card.kana || "").trim()) return "a card had an empty kana field";
                   if (!String(card.romaji || "").trim()) return "a card had an empty romaji field";
                   if (scriptLooksWrong(card.japanese, fullLangCode)) return "a card's japanese field script did not match the target language";
+                  // 12.1: same Korean romaji-must-actually-be-romanized guard as generateFastCards.
+                  if (fullLangCode === "ko" && CJK_RE.test(String(card.romaji || ""))) return "a Korean card's romaji field contained Hangul instead of romanization";
                   if (!Array.isArray(card.words) || card.words.length === 0) return "a card had an empty words breakdown";
                   for (const w of card.words) {
                             if (!String(w?.jp || "").trim() || !String(w?.meaning || "").trim()) return "a card's words array had an incomplete entry";
+                            if (fullLangCode === "ko" && CJK_RE.test(String(w?.romaji || ""))) return "a Korean card's word-breakdown romaji contained Hangul instead of romanization";
                   }
+                  // Simon reported two different submitted words/phrases ("tomorrow" and "near to
+                  // here") coming back with an identical translation. This batch call trusts the
+                  // model's Nth card corresponds to the Nth submitted sentence with no check that's
+                  // actually true - catch it here rather than silently shipping a mismatched card.
+                  if (normalizeEnglishKey(card.english) !== normalizeEnglishKey(sentences[i])) {
+                            return `card ${i} echoed a different sentence than submitted ("${card.english}" vs "${sentences[i]}")`;
+                  }
+          }
+          // Two different input sentences must never produce a byte-identical translation -
+          // the model duplicated one card's content to fill out the count instead of genuinely
+          // translating every distinct input.
+          const seen = new Map();
+          for (let i = 0; i < cards.length; i++) {
+                  const key = normalizeEnglishKey(cards[i].japanese);
+                  if (!key) continue;
+                  if (seen.has(key) && normalizeEnglishKey(sentences[i]) !== normalizeEnglishKey(sentences[seen.get(key)])) {
+                            return `cards ${seen.get(key)} and ${i} produced identical translations for different input sentences ("${sentences[seen.get(key)]}" vs "${sentences[i]}")`;
+                  }
+                  seen.set(key, i);
           }
           return true;
     }
