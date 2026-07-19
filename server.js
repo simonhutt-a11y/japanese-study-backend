@@ -222,6 +222,11 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
 }
 
 const CJK_RE = /[぀-ヿ㐀-鿿가-힯]/;
+// 11.28.30 (Simon: "one is showing english / korean text / korean text" on a handful of
+// Korean cards after the romanization fix shipped): Hangul-only, used to tell a genuine
+// Korean card apart from a Japanese one inside inferCardLanguage below - CJK_RE matches
+// both scripts on purpose everywhere else in this file, which is exactly what broke this.
+const HANGUL_RE = /[가-힣ᄀ-ᇿ㄰-㆏]/;
 
 function scriptLooksWrong(text, langCode) {
     const clean = String(text || "").trim();
@@ -644,6 +649,14 @@ function cardNeedsRepair(card) {
     if (!japanese) reasons.push("empty-japanese");
     if (japanese && !kana) reasons.push("empty-kana");
     if (japanese && !romaji) reasons.push("empty-romaji");
+    // 11.28.30 (Simon: cards saved before the 11.28.29 Korean-romanization fix have a
+    // "romaji" field that's really just another copy of the Hangul, not a real
+    // Revised Romanization): a genuine pronunciation guide is pure Latin script, so if it
+    // still contains CJK/Hangul characters the "romanization" never actually happened.
+    // This only ever fires for ja/ko cards - every other language's romaji is SUPPOSED to
+    // equal its japanese field verbatim (see buildNonJapaneseFullInstructions), and none of
+    // those languages' text can match CJK_RE in the first place.
+    if (romaji && CJK_RE.test(romaji)) reasons.push("romaji-contains-script");
     if (!words.length) reasons.push("empty-words");
     else if (!wordsAreComplete(words)) reasons.push("incomplete-words");
     return reasons;
@@ -652,6 +665,14 @@ function cardNeedsRepair(card) {
 async function inferCardLanguage(card) {
     const existingScript = String(card.japanese || card.kana || "").trim();
     if (!existingScript) return "ja"; // nothing to go on - matches resolveCardsLanguage's own default
+    // 11.28.30 (real bug caught while investigating Simon's Korean duplicate-romaji report):
+    // this used to test CJK_RE first, which matches Hangul as well as kanji/kana - every
+    // Korean card's japanese/kana field (genuinely Hangul, despite the field name) was being
+    // inferred as "ja". repairExistingCard would then regenerate the card's English sentence
+    // IN JAPANESE and compare it against the stored Korean text, which can never match -
+    // repair silently no-ops on every Korean card instead of fixing it (reported as a
+    // "mismatch", not applied). Check Hangul specifically, before the general CJK check.
+    if (HANGUL_RE.test(existingScript)) return "ko";
     if (CJK_RE.test(existingScript)) return "ja"; // CJK script present - overwhelmingly the common case
     try {
           const detected = await detectLanguageFromText({ text: existingScript, primaryLanguage: "en" });
@@ -685,6 +706,11 @@ async function repairExistingCard(card) {
           // Same sentence already on the card - safe to fill genuine gaps, never touch the rest.
           if (reasons.includes("empty-kana") && fresh.kana) patch.kana = fresh.kana;
           if (reasons.includes("empty-romaji") && fresh.romaji) patch.romaji = fresh.romaji;
+        // 11.28.30: the fresh romaji only replaces a duplicated-script one if it's
+        // actually clean this time - never overwrite with another copy of the same problem.
+        if (reasons.includes("romaji-contains-script") && fresh.romaji && !CJK_RE.test(fresh.romaji)) {
+            patch.romaji = fresh.romaji;
+        }
           if (
                   (reasons.includes("empty-words") || reasons.includes("incomplete-words")) &&
                   Array.isArray(fresh.words) && fresh.words.length && fresh.words.length >= oldWords.length
