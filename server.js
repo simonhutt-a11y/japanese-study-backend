@@ -775,26 +775,48 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
               startPosition = Number(lastPositionRows[0].position || 0) + 1;
       }
   
-      const cardRows = cards.map((card, index) => ({
-    user_id: userId,
-    deck_id: deck.id,
-    english: card.english || "",
-    japanese: card.japanese || "",
-    kana: card.kana || "",
-    romaji: card.romaji || "",
-    difficulty: Number(card.difficulty || 2),
-    words: Array.isArray(card.words) ? card.words : [],
-    position: startPosition + index
-  }));
+        // Simon (2026-07-19: "need to esure these duplicates are not created in the future"):
+        // this used to insert() every incoming card unconditionally, even if a card with the
+        // exact same content already existed in this deck - every re-save of an already-saved
+        // folder (a heal, a re-sync, anything that calls this function again with the same
+        // list) silently added a fresh duplicate row on top of the old one. Look up what's
+        // already in this deck by content (english+japanese) and skip re-inserting anything
+        // that's already there.
+        const contentKey = (c) => `${String(c.english || "").trim().toLowerCase()}||${String(c.japanese || "").trim()}`;
+        const { data: existingCardRows, error: existingCardsError } = await supabase
+          .from("cards")
+          .select("english,japanese")
+          .eq("deck_id", deck.id);
 
-  const { data: savedCards, error: cardsError } = await supabase
-    .from("cards")
-    .insert(cardRows)
-    .select();
+        if (existingCardsError) throw new Error(`Supabase existing-cards lookup failed: ${existingCardsError.message}`);
 
-  if (cardsError) throw new Error(`Supabase cards save failed: ${cardsError.message}`);
+        const existingKeys = new Set((existingCardRows || []).map(contentKey));
+        const newCards = cards.filter((card) => !existingKeys.has(contentKey(card)));
 
-  return { deck, cards: savedCards || [] };
+        const cardRows = newCards.map((card, index) => ({
+                  user_id: userId,
+                  deck_id: deck.id,
+                  english: card.english || "",
+                  japanese: card.japanese || "",
+                  kana: card.kana || "",
+                  romaji: card.romaji || "",
+                  difficulty: Number(card.difficulty || 2),
+                  words: Array.isArray(card.words) ? card.words : [],
+                  position: startPosition + index
+        }));
+
+        let savedCards = [];
+        if (cardRows.length) {
+                  const { data, error: cardsError } = await supabase
+                    .from("cards")
+                    .insert(cardRows)
+                    .select();
+
+                  if (cardsError) throw new Error(`Supabase cards save failed: ${cardsError.message}`);
+                  savedCards = data || [];
+        }
+
+        return { deck, cards: savedCards };
 }
 
 // Simon (2026-07-11: "please find all of the duplicates and get rid of them. the only
