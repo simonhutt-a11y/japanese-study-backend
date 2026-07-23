@@ -6,20 +6,26 @@ import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { createClient } from "@supabase/supabase-js";
 
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*", credentials: false }));
 app.use(express.json({ limit: "2mb" }));
 
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+
 const BACKEND_VERSION = "0.3.0-conversation-turn";
+
 
 const SUPPORTED_LANGUAGES = {
   en: { code: "en", name: "English", transcriptionHint: "en" },
@@ -36,11 +42,14 @@ const SUPPORTED_LANGUAGES = {
   pt: { code: "pt", name: "Portuguese", transcriptionHint: "pt" }
 };
 
+
 const SUPPORTED_LANGUAGE_LIST = Object.values(SUPPORTED_LANGUAGES);
+
 
 async function getUser(req) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
 
   if (!token) {
     const err = new Error("Missing login token. Please log in again.");
@@ -48,7 +57,9 @@ async function getUser(req) {
     throw err;
   }
 
+
   const { data, error } = await supabase.auth.getUser(token);
+
 
   if (error || !data?.user?.id) {
     const err = new Error("Invalid or expired login token. Please log in again.");
@@ -56,13 +67,16 @@ async function getUser(req) {
     throw err;
   }
 
+
   return data.user;
 }
+
 
 function cleanSentenceList(sentences) {
   if (!Array.isArray(sentences)) return [];
   return sentences.map(s => String(s || "").trim()).filter(Boolean).slice(0, 50);
 }
+
 
 function safeJsonParse(text) {
   const cleaned = String(text || "").trim()
@@ -71,12 +85,15 @@ function safeJsonParse(text) {
     .replace(/```$/i, "")
     .trim();
 
+
   return JSON.parse(cleaned);
 }
+
 
 function normalizeLanguageCode(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw) return "";
+
 
   if (raw.startsWith("en")) return "en";
   if (raw.startsWith("ja") || raw === "jp") return "ja";
@@ -91,13 +108,16 @@ function normalizeLanguageCode(value) {
   if (raw.startsWith("da")) return "da";
   if (raw.startsWith("pt")) return "pt";
 
+
   return raw.slice(0, 2);
 }
+
 
 function languageName(code) {
   const clean = normalizeLanguageCode(code);
   return SUPPORTED_LANGUAGES[clean]?.name || clean || "Unknown";
 }
+
 
 // 12.0 (Simon: "English to german has DBs in japanese" / "same with italian"): the
 // process-sentences card generators below were hardcoded to Japanese with no language
@@ -146,20 +166,25 @@ function buildKoreanFullInstructions() {
     "Keep translations natural and useful for travel/conversation. The \"japanese\" field must contain the natural Korean translation, written in Hangul (despite its name, this field always holds whichever language is being studied, not literally Japanese). The \"kana\" field should repeat that same Hangul text exactly - Korean has no separate bridging reading script the way Japanese needs kana for kanji. The \"romaji\" field must be genuine Revised Romanization of Korean for that sentence (the modern South Korean government standard, e.g. 안녕하세요 -> annyeonghaseyo) - real transliterated Latin letters a learner can read aloud, NEVER a copy of the Hangul text. Difficulty must be 1, 2, or 3. Use the vocabulary a native speaker would naturally use in the situation the sentence implies. The words array must be a word-by-word (or short natural phrase) breakdown of the EXACT Korean sentence returned: cover it completely and in order, with no missing or extra words, and never words from a different translation of the same english sentence. Every words entry must include jp (the Korean word or phrase exactly as written in the sentence, in Hangul - despite the field name, not literally Japanese), kana (repeat jp - no separate reading needed), romaji (that word's own Revised Romanization, real transliterated Latin letters, never a Hangul copy), and a short english meaning. The card kana field must exactly match the japanese field.";
 }
 
+
 function resolveConversationTargetLanguage({ sourceLanguage, primaryLanguage, partnerLanguage, targetLanguage }) {
   const source = normalizeLanguageCode(sourceLanguage);
   const primary = normalizeLanguageCode(primaryLanguage) || "en";
   const partner = normalizeLanguageCode(partnerLanguage) || "ja";
   const requestedTarget = normalizeLanguageCode(targetLanguage);
 
+
   if (requestedTarget && requestedTarget !== source) return requestedTarget;
+
 
   if (source === primary) return partner;
   if (source === partner) return primary;
 
+
   if (source === "en") return partner || "ja";
   return primary || "en";
 }
+
 
 const WHISPER_HALLUCINATION_PHRASES = [
   "thanks for watching", "thank you for watching", "thanks for listening",
@@ -177,10 +202,12 @@ function looksLikeWhisperHallucination(text, durationSeconds) {
   return WHISPER_HALLUCINATION_PHRASES.some(phrase => normalized === phrase || normalized.includes(phrase));
 }
 
+
 async function transcribeAudio(fileBuffer, originalname, mimetype, options = {}) {
   const file = await toFile(fileBuffer, originalname || "sentence.webm", {
     type: mimetype || "audio/webm"
   });
+
 
   const transcribeModel = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
   const canVerify = transcribeModel === "whisper-1";
@@ -190,17 +217,21 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
   };
   if (canVerify) request.response_format = "verbose_json";
 
+
   const language = normalizeLanguageCode(options.language);
   if (language) request.language = language;
   if (options.prompt) request.prompt = options.prompt;
+
 
   const transcription = await openai.audio.transcriptions.create(request);
   const text = String(transcription?.text || "").trim();
   const duration = canVerify ? (Number(transcription?.duration) || 0) : 0;
 
+
   if (canVerify) {
     console.log("Whisper transcription", { duration, textLength: text.length, text: text.slice(0, 80) });
   }
+
 
   if (canVerify && transcription && typeof transcription === "object") {
     const segments = Array.isArray(transcription.segments) ? transcription.segments : [];
@@ -218,15 +249,25 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
     }
   }
 
+
   return text;
 }
 
+
 const CJK_RE = /[぀-ヿ㐀-鿿가-힯]/;
+// 2026-07-23 (Simon, real device: a Japanese card showed the kanji line duplicated into
+// what should be the kana/hiragana reading line): CJK_RE above already spans hiragana AND
+// katakana (U+3040-30FF) as well as kanji, so it can't be reused to detect "kana field
+// wrongly contains kanji" - it would misfire on every legitimate kana reading. KANJI_RE is
+// the TRUE kanji-only range (CJK Ext A + Unified Ideographs), excluding hiragana/katakana,
+// used below by kana-contains-kanji.
+const KANJI_RE = /[\u3400-\u9fff]/;
 // 11.28.30 (Simon: "one is showing english / korean text / korean text" on a handful of
 // Korean cards after the romanization fix shipped): Hangul-only, used to tell a genuine
 // Korean card apart from a Japanese one inside inferCardLanguage below - CJK_RE matches
 // both scripts on purpose everywhere else in this file, which is exactly what broke this.
 const HANGUL_RE = /[가-힣ᄀ-ᇿ㄰-㆏]/;
+
 
 function scriptLooksWrong(text, langCode) {
     const clean = String(text || "").trim();
@@ -239,9 +280,11 @@ function scriptLooksWrong(text, langCode) {
     return false;
 }
 
+
 async function generateWithValidation(label, generateFn, validateFn, { maxAttempts = 3 } = {}) {
     let lastReason = "";
     let lastResult = null;
+
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           let result;
@@ -257,6 +300,7 @@ async function generateWithValidation(label, generateFn, validateFn, { maxAttemp
                   continue;
           }
 
+
           const verdict = validateFn(result);
           if (verdict === true) {
                   if (attempt > 1) {
@@ -265,10 +309,12 @@ async function generateWithValidation(label, generateFn, validateFn, { maxAttemp
                   return result;
           }
 
+
           lastReason = String(verdict || "validation failed");
           lastResult = result;
           console.warn(`${label}: attempt ${attempt}/${maxAttempts} failed validation: ${lastReason}`);
     }
+
 
     console.error(`${label}: all ${maxAttempts} attempts failed validation, last reason: ${lastReason}`);
     const err = new Error("Translation could not be completed accurately - please try again.");
@@ -277,6 +323,7 @@ async function generateWithValidation(label, generateFn, validateFn, { maxAttemp
     err.lastResult = lastResult;
     throw err;
 }
+
 
 async function generateFastCards(sentences, targetLanguage) {
     const fastLangCode = resolveCardsLanguage(targetLanguage);
@@ -291,6 +338,7 @@ async function generateFastCards(sentences, targetLanguage) {
     // returned (before the position-based `english` fallback below papers over a missing
     // echo) so validate() can catch a real mismatch instead of it being silently overwritten.
     let lastRawCards = null;
+
 
     async function attempt() {
           const response = await openai.responses.create({
@@ -319,9 +367,11 @@ async function generateFastCards(sentences, targetLanguage) {
                             })
           });
 
+
           const parsed = safeJsonParse(response.output_text);
           if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid fast cards JSON");
           lastRawCards = parsed.cards;
+
 
           return parsed.cards.map((card, index) => ({
                   english: card.english || sentences[index] || "",
@@ -332,6 +382,7 @@ async function generateFastCards(sentences, targetLanguage) {
                   words: []
           }));
     }
+
 
     function validate(cards) {
           if (!Array.isArray(cards) || cards.length !== sentences.length) return "card count did not match sentence count";
@@ -370,8 +421,10 @@ async function generateFastCards(sentences, targetLanguage) {
           return true;
     }
 
+
     return generateWithValidation("generateFastCards", attempt, validate);
 }
+
 
 async function generateInstantTranslation(english) {
     async function attempt() {
@@ -389,13 +442,16 @@ async function generateInstantTranslation(english) {
                   })
           });
 
+
           const parsed = safeJsonParse(response.output_text);
+
 
           return {
                   japanese: parsed.japanese || "",
                   romaji: parsed.romaji || ""
           };
     }
+
 
     function validate(result) {
           if (!String(result.japanese || "").trim()) return "empty japanese field";
@@ -404,12 +460,15 @@ async function generateInstantTranslation(english) {
           return true;
     }
 
+
     return generateWithValidation("generateInstantTranslation", attempt, validate);
 }
+
 
 async function generateFullCards(sentences, targetLanguage) {
     const fullLangCode = resolveCardsLanguage(targetLanguage);
     const fullLangLabel = languageName(fullLangCode);
+
 
     async function attempt() {
           const response = await openai.responses.create({
@@ -425,10 +484,12 @@ async function generateFullCards(sentences, targetLanguage) {
                             '\n\nReturn JSON shaped as: {"cards":[{"english":"","japanese":"","kana":"","romaji":"","difficulty":2,"words":[{"jp":"","kana":"","romaji":"","meaning":""}]}]}'
           });
 
+
           const parsed = safeJsonParse(response.output_text);
           if (!Array.isArray(parsed.cards)) throw new Error("AI returned invalid cards JSON");
           return parsed.cards;
     }
+
 
     function validate(cards) {
           if (!Array.isArray(cards) || cards.length !== sentences.length) return "card count did not match sentence count";
@@ -469,8 +530,10 @@ async function generateFullCards(sentences, targetLanguage) {
           return true;
     }
 
+
     return generateWithValidation("generateFullCards", attempt, validate);
 }
+
 
 async function generateConversationTurn({
     transcript,
@@ -487,6 +550,7 @@ async function generateConversationTurn({
           partnerLanguage,
           targetLanguage
     });
+
 
     async function attempt(attemptNumber) {
           const response = await openai.responses.create({
@@ -537,7 +601,9 @@ async function generateConversationTurn({
                   })
           });
 
+
           const parsed = safeJsonParse(response.output_text);
+
 
           const finalSourceLanguage = normalizeLanguageCode(parsed.sourceLanguage) || cleanSourceLanguage || "";
           const finalTargetLanguage =
@@ -548,6 +614,7 @@ async function generateConversationTurn({
                             partnerLanguage,
                             targetLanguage: cleanTargetLanguage
                   });
+
 
           return {
                   transcript: parsed.transcript || cleanTranscript,
@@ -560,6 +627,7 @@ async function generateConversationTurn({
                   confidence: Number(parsed.confidence || 0.8)
           };
     }
+
 
     function validate(result) {
           const translation = String(result.translation || "").trim();
@@ -580,8 +648,10 @@ async function generateConversationTurn({
           return true;
     }
 
+
     return generateWithValidation("generateConversationTurn", attempt, validate);
 }
+
 
 async function detectLanguageFromText({
   text,
@@ -589,6 +659,7 @@ async function detectLanguageFromText({
   partnerLanguage
 }) {
   const cleanText = String(text || "").trim();
+
 
   const response = await openai.responses.create({
         model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini",
@@ -610,13 +681,16 @@ async function detectLanguageFromText({
     })
   });
 
+
   const parsed = safeJsonParse(response.output_text);
+
 
   return {
     sourceLanguage: normalizeLanguageCode(parsed.sourceLanguage) || "",
     confidence: Number(parsed.confidence || 0.8)
   };
 }
+
 
 // --- Retrospective repair (Simon, 2026-07-11: "who knows how many times we have looked at
 // the same problem baked in to old cards" / "can't you apply all the new rules and fixes to
@@ -639,6 +713,7 @@ function wordsAreComplete(words) {
     return words.every(w => String(w?.jp || "").trim() && String(w?.meaning || "").trim());
 }
 
+
 function cardNeedsRepair(card) {
     const reasons = [];
     const japanese = String(card.japanese || "").trim();
@@ -657,10 +732,17 @@ function cardNeedsRepair(card) {
     // equal its japanese field verbatim (see buildNonJapaneseFullInstructions), and none of
     // those languages' text can match CJK_RE in the first place.
     if (romaji && CJK_RE.test(romaji)) reasons.push("romaji-contains-script");
+  // 2026-07-23 (Simon, real device: "2 x lines of kanji instead of kana and kanji" - a card's
+  // kana field had been filled with a straight copy of the kanji text instead of an actual
+  // hiragana reading): mirrors romaji-contains-script above, but for the kana field - only
+  // non-empty-kana was ever checked before, never whether it actually contains kanji. Uses
+  // KANJI_RE (not CJK_RE) since CJK_RE would match every legitimate kana reading too.
+  if (kana && KANJI_RE.test(kana)) reasons.push("kana-contains-kanji");
     if (!words.length) reasons.push("empty-words");
     else if (!wordsAreComplete(words)) reasons.push("incomplete-words");
     return reasons;
 }
+
 
 async function inferCardLanguage(card) {
     const existingScript = String(card.japanese || card.kana || "").trim();
@@ -682,6 +764,7 @@ async function inferCardLanguage(card) {
     } catch (e) { /* fall through to default */ }
     return "ja";
 }
+
 
 async function repairExistingCard(card) {
     const reasons = cardNeedsRepair(card);
@@ -731,8 +814,10 @@ async function repairExistingCard(card) {
     return { changed: true, reasons, patchedFields: Object.keys(patch) };
 }
 
+
 async function saveDeckAndCards({ userId, deckName, cards }) {
   const cleanDeckName = String(deckName || "Untitled folder").trim() || "Untitled folder";
+
 
     // Simon (2026-07-11: "514 decks and 8225 total card rows" / "the only things that should
     // be saved are the cards... I want this clean"): this used to unconditionally insert() a
@@ -748,9 +833,12 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
       .order("created_at", { ascending: true })
       .limit(1);
 
+
     if (existingDeckError) throw new Error(`Supabase deck lookup failed: ${existingDeckError.message}`);
 
+
     let deck = existingDecks && existingDecks[0];
+
 
     if (!deck) {
           const { data: newDeck, error: deckError } = await supabase
@@ -758,6 +846,7 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
             .insert({ user_id: userId, name: cleanDeckName })
             .select()
             .single();
+
 
           if (deckError) throw new Error(`Supabase deck save failed: ${deckError.message}`);
           deck = newDeck;
@@ -788,10 +877,13 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
           .select("english,japanese")
           .eq("deck_id", deck.id);
 
+
         if (existingCardsError) throw new Error(`Supabase existing-cards lookup failed: ${existingCardsError.message}`);
+
 
         const existingKeys = new Set((existingCardRows || []).map(contentKey));
         const newCards = cards.filter((card) => !existingKeys.has(contentKey(card)));
+
 
         const cardRows = newCards.map((card, index) => ({
                   user_id: userId,
@@ -805,6 +897,7 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
                   position: startPosition + index
         }));
 
+
         let savedCards = [];
         if (cardRows.length) {
                   const { data, error: cardsError } = await supabase
@@ -812,12 +905,15 @@ async function saveDeckAndCards({ userId, deckName, cards }) {
                     .insert(cardRows)
                     .select();
 
+
                   if (cardsError) throw new Error(`Supabase cards save failed: ${cardsError.message}`);
                   savedCards = data || [];
         }
 
+
         return { deck, cards: savedCards };
 }
+
 
 // Simon (2026-07-11: "please find all of the duplicates and get rid of them. the only
 // cards that should be in existence are those in the folders for each persons login"):
@@ -829,6 +925,7 @@ function normalizeEnglishKey(text) {
     return String(text || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+
 function cardCompleteness(card) {
     let score = 0;
     if (String(card.japanese || "").trim()) score++;
@@ -837,6 +934,7 @@ function cardCompleteness(card) {
     if (Array.isArray(card.words) && card.words.length) score += card.words.length;
     return score;
 }
+
 
 function buildConsolidationPlan(decks, cards) {
     // 1. Group decks by (user_id, name) - the fragmentation bug (514 decks / ~24 real names).
@@ -944,6 +1042,7 @@ function buildConsolidationPlan(decks, cards) {
     return { cardReassignments, cardsToDelete, decksToDelete, orphanCards, summary };
 }
 
+
 // Simon (2026-07-11: "if this was scaled up to 100 users... would it slow down?"): loadAllRows
 // used to have no way to filter server-side, so /decks called it unfiltered for "cards" and
 // threw away every other user's rows in JS afterwards - meaning every single page load
@@ -969,6 +1068,7 @@ async function loadAllRows(table, extraSelect, filterFn) {
     return rows;
 }
 
+
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -983,12 +1083,15 @@ app.get("/health", (req, res) => {
   });
 });
 
+
 app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => {
   const started = Date.now();
+
 
   try {
     await getUser(req);
     if (!req.file) return res.status(400).json({ error: "No audio file uploaded" });
+
 
     const language = normalizeLanguageCode(req.body?.language);
     const text = await transcribeAudio(
@@ -997,6 +1100,7 @@ app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => 
       req.file.mimetype,
       { language }
     );
+
 
     res.json({
       ok: true,
@@ -1011,19 +1115,25 @@ app.post("/transcribe-audio", upload.single("audio"), async (req, res, next) => 
   }
 });
 
+
 app.post("/translate-instant", async (req, res, next) => {
   const started = Date.now();
+
 
   try {
     await getUser(req);
 
+
     const english = String(req.body?.english || "").trim();
+
 
     if (!english) {
       return res.status(400).json({ error: "No English supplied" });
     }
 
+
     const translated = await generateInstantTranslation(english);
+
 
     res.json({
       ok: true,
@@ -1040,16 +1150,20 @@ app.post("/translate-instant", async (req, res, next) => {
 });app.post("/conversation-turn", upload.single("audio"), async (req, res, next) => {
   const started = Date.now();
 
+
   try {
     await getUser(req);
+
 
     const primaryLanguage = normalizeLanguageCode(req.body?.primaryLanguage) || "en";
     const partnerLanguage = normalizeLanguageCode(req.body?.partnerLanguage) || "ja";
     const suppliedSourceLanguage = normalizeLanguageCode(req.body?.sourceLanguage);
     const suppliedTargetLanguage = normalizeLanguageCode(req.body?.targetLanguage);
 
+
     let transcript = String(req.body?.text || req.body?.transcript || "").trim();
     let transcribeMs = 0;
+
 
     if (!transcript && req.file) {
       const transcribeStarted = Date.now();
@@ -1064,6 +1178,7 @@ app.post("/translate-instant", async (req, res, next) => {
       transcribeMs = Date.now() - transcribeStarted;
     }
 
+
     if (!transcript) {
       return res.status(400).json({
         ok: false,
@@ -1074,7 +1189,9 @@ app.post("/translate-instant", async (req, res, next) => {
       });
     }
 
+
     let sourceLanguage = suppliedSourceLanguage;
+
 
     if (!sourceLanguage) {
       const detected = await detectLanguageFromText({
@@ -1085,6 +1202,7 @@ app.post("/translate-instant", async (req, res, next) => {
       sourceLanguage = detected.sourceLanguage;
     }
 
+
     const translated = await generateConversationTurn({
       transcript,
       sourceLanguage,
@@ -1092,6 +1210,7 @@ app.post("/translate-instant", async (req, res, next) => {
       primaryLanguage,
       partnerLanguage
     });
+
 
 console.log("Conversation turn result", {
   requestedSourceLanguage: suppliedSourceLanguage || "(auto-detect)",
@@ -1127,22 +1246,28 @@ console.log("Conversation turn result", {
   }
 });
 
+
 app.post("/conversation-translate-text", async (req, res, next) => {
   const started = Date.now();
+
 
   try {
     await getUser(req);
 
+
     const text = String(req.body?.text || req.body?.transcript || "").trim();
+
 
     if (!text) {
       return res.status(400).json({ error: "No text supplied" });
     }
 
+
     const primaryLanguage = normalizeLanguageCode(req.body?.primaryLanguage) || "en";
     const partnerLanguage = normalizeLanguageCode(req.body?.partnerLanguage) || "ja";
     let sourceLanguage = normalizeLanguageCode(req.body?.sourceLanguage);
     const targetLanguage = normalizeLanguageCode(req.body?.targetLanguage);
+
 
     if (!sourceLanguage) {
       const detected = await detectLanguageFromText({
@@ -1153,6 +1278,7 @@ app.post("/conversation-translate-text", async (req, res, next) => {
       sourceLanguage = detected.sourceLanguage;
     }
 
+
     const translated = await generateConversationTurn({
       transcript: text,
       sourceLanguage,
@@ -1160,6 +1286,7 @@ app.post("/conversation-translate-text", async (req, res, next) => {
       primaryLanguage,
       partnerLanguage
     });
+
 
     res.json({
       ok: true,
@@ -1182,30 +1309,37 @@ app.post("/conversation-translate-text", async (req, res, next) => {
   }
 });
 
+
 app.post("/process-sentences", async (req, res, next) => {
   const started = Date.now();
+
 
   try {
     const user = await getUser(req);
     const { deckName, sentences, fast, mode, skipBreakdown, targetLanguage } = req.body || {};
     const cleanSentences = cleanSentenceList(sentences);
 
+
     if (!cleanSentences.length) {
       return res.status(400).json({ error: "No sentences supplied" });
     }
+
 
     const useFast = fast === true || mode === "fast" || skipBreakdown === true;
     const generatedCards = useFast
       ? await generateFastCards(cleanSentences, targetLanguage)
       : await generateFullCards(cleanSentences, targetLanguage);
 
+
     const aiMs = Date.now() - started;
+
 
     const saved = await saveDeckAndCards({
       userId: user.id,
       deckName,
       cards: generatedCards
     });
+
 
     res.json({
       ok: true,
@@ -1223,6 +1357,7 @@ app.post("/process-sentences", async (req, res, next) => {
     next(err);
   }
 });
+
 
 // Simon (2026-07-11: "your dog is cute." saved 168 times / "could this mess be slowing
 // things down?"): root cause of the runaway card-row duplication. The frontend's
@@ -1267,19 +1402,24 @@ app.post("/regenerate-card-content", async (req, res, next) => {
     }
 });
 
+
 app.post("/process-sentences-fast", async (req, res, next) => {
   req.body = { ...(req.body || {}), fast: true, skipBreakdown: true };
   app._router.handle(req, res, next);
 });
 
+
 app.post("/capture-audio-fast", upload.single("audio"), async (req, res, next) => {
   const started = Date.now();
+
 
   try {
     const user = await getUser(req);
     if (!req.file) return res.status(400).json({ error: "No audio file uploaded" });
 
+
     const { deckName } = req.body || {};
+
 
     const english = await transcribeAudio(
       req.file.buffer,
@@ -1288,7 +1428,9 @@ app.post("/capture-audio-fast", upload.single("audio"), async (req, res, next) =
       { language: "en" }
     );
 
+
     const transcribeMs = Date.now() - started;
+
 
     if (!english) {
       return res.status(400).json({
@@ -1301,14 +1443,17 @@ app.post("/capture-audio-fast", upload.single("audio"), async (req, res, next) =
       });
     }
 
+
     const generatedCards = await generateFastCards([english]);
     const aiMs = Date.now() - started - transcribeMs;
+
 
     const saved = await saveDeckAndCards({
       userId: user.id,
       deckName,
       cards: generatedCards
     });
+
 
     res.json({
       ok: true,
@@ -1328,6 +1473,7 @@ app.post("/capture-audio-fast", upload.single("audio"), async (req, res, next) =
     next(err);
   }
 });
+
 
 app.post("/repair-existing-cards", async (req, res, next) => {
     const started = Date.now();
@@ -1409,6 +1555,7 @@ app.post("/repair-existing-cards", async (req, res, next) => {
     }
 });
 
+
 // Simon (2026-07-11: flagged after the pagination fix above - a live dry-run scan found
 // 18,713 real card rows, but this endpoint's own nested "cards(*)" embed was only ever
 // returning 8,496 of them): the same "silently caps rows rather than erroring" pattern as
@@ -1419,13 +1566,16 @@ app.get("/decks", async (req, res, next) => {
     try {
           const user = await getUser(req);
 
+
           const { data: decks, error: decksError } = await supabase
             .from("decks")
             .select("*")
             .eq("user_id", user.id)
             .order("created_at", { ascending: false });
 
+
           if (decksError) throw new Error(`Supabase deck load failed: ${decksError.message}`);
+
 
           // Filter server-side (mirrors the decks query above) instead of loading every user's
           // cards into this process and discarding the ones that aren't ours.
@@ -1437,16 +1587,19 @@ app.get("/decks", async (req, res, next) => {
                   cardsByDeck.get(card.deck_id).push(card);
           }
 
+
           const decksWithCards = (decks || []).map(deck => ({
                   ...deck,
                   cards: (cardsByDeck.get(deck.id) || []).sort((a, b) => (a.position || 0) - (b.position || 0))
           }));
+
 
           res.json({ ok: true, decks: decksWithCards });
     } catch (err) {
           next(err);
     }
 });
+
 
 // Simon (2026-07-11: "please find all of the duplicates and get rid of them. the only
 // cards that should be in existence are those in the folders for each persons login"):
@@ -1459,17 +1612,21 @@ app.get("/decks", async (req, res, next) => {
 app.post("/consolidate-library", async (req, res, next) => {
     const started = Date.now();
 
+
     try {
           await getUser(req); // require *a* valid login to call this at all
           const { execute } = req.body || {};
           const doExecute = execute === true;
+
 
           const [decks, cards] = await Promise.all([
                   loadAllRows("decks", "*"),
                   loadAllRows("cards", "*")
                 ]);
 
+
           const plan = buildConsolidationPlan(decks, cards);
+
 
           if (doExecute) {
                   for (const r of plan.cardReassignments) {
@@ -1479,6 +1636,7 @@ app.post("/consolidate-library", async (req, res, next) => {
                               .eq("id", r.cardId);
                             if (error) throw new Error(`Supabase card reassign failed (id ${r.cardId}): ${error.message}`);
                   }
+
 
                   // Simon (2026-07-11: first real execute run hit "414 Request-URI Too Large" from
                               // Cloudflare - PostgREST's .in("id", [...]) filter is sent as a URL query string,
@@ -1492,12 +1650,14 @@ app.post("/consolidate-library", async (req, res, next) => {
                                                     if (error) throw new Error(`Supabase card delete failed (batch starting at ${i}): ${error.message}`);
                               }
 
+
                               for (let i = 0; i < plan.decksToDelete.length; i += DELETE_BATCH_SIZE) {
                                                     const batch = plan.decksToDelete.slice(i, i + DELETE_BATCH_SIZE);
                                                     const { error } = await supabase.from("decks").delete().in("id", batch);
                                                     if (error) throw new Error(`Supabase deck delete failed (batch starting at ${i}): ${error.message}`);
                               }
           }
+
 
           res.json({
                   ok: true,
@@ -1511,10 +1671,13 @@ app.post("/consolidate-library", async (req, res, next) => {
 });
 
 
+
+
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || "Server error" });
 });
+
 
 const port = Number(process.env.PORT || 8787);
 app.listen(port, () => {
