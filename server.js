@@ -222,6 +222,13 @@ async function transcribeAudio(fileBuffer, originalname, mimetype, options = {})
 }
 
 const CJK_RE = /[぀-ヿ㐀-鿿가-힯]/;
+// 2026-07-23 (Simon, real device: a Japanese card showed the kanji line duplicated into
+// what should be the kana/hiragana reading line): CJK_RE above already spans hiragana AND
+// katakana (U+3040-30FF) as well as kanji, so it can't be reused to detect "kana field
+// wrongly contains kanji" - it would misfire on every legitimate kana reading. KANJI_RE is
+// the TRUE kanji-only range (CJK Ext A + Unified Ideographs), excluding hiragana/katakana,
+// used below by kana-contains-kanji.
+const KANJI_RE = /[\u3400-\u9fff]/;
 // 11.28.30 (Simon: "one is showing english / korean text / korean text" on a handful of
 // Korean cards after the romanization fix shipped): Hangul-only, used to tell a genuine
 // Korean card apart from a Japanese one inside inferCardLanguage below - CJK_RE matches
@@ -657,6 +664,12 @@ function cardNeedsRepair(card) {
     // equal its japanese field verbatim (see buildNonJapaneseFullInstructions), and none of
     // those languages' text can match CJK_RE in the first place.
     if (romaji && CJK_RE.test(romaji)) reasons.push("romaji-contains-script");
+  // 2026-07-23 (Simon, real device: "2 x lines of kanji instead of kana and kanji" - a card's
+  // kana field had been filled with a straight copy of the kanji text instead of an actual
+  // hiragana reading): mirrors romaji-contains-script above, but for the kana field - only
+  // non-empty-kana was ever checked before, never whether it actually contains kanji. Uses
+  // KANJI_RE (not CJK_RE) since CJK_RE would match every legitimate kana reading too.
+  if (kana && KANJI_RE.test(kana)) reasons.push("kana-contains-kanji");
     if (!words.length) reasons.push("empty-words");
     else if (!wordsAreComplete(words)) reasons.push("incomplete-words");
     return reasons;
